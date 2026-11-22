@@ -9,6 +9,14 @@ import time
 import httpx
 import psutil
 import win32service
+import win32api
+import win32file
+import win32net
+import win32netcon
+import win32security
+import pywintypes
+from rdp_guard.firewall import FirewallEngine, owned
+from rdp_guard.windows.firewall import WindowsFirewall
 
 if os.environ.get("GITHUB_ACTIONS") != "true":
     raise SystemExit("Only run this integration test in a disposable GitHub Actions runner")
@@ -25,6 +33,43 @@ for _ in range(45):
 else:
     raise RuntimeError(status.stderr)
 assert json.loads(status.stdout)["mode"] == "MONITOR ONLY"
+
+# A normal local user must not be able to bypass the web boundary through the pipe or database.
+username = "rdpg-ci-" + secrets.token_hex(3)
+user_password = secrets.token_urlsafe(32) + "aA1!"
+win32net.NetUserAdd(None, 1, {"name": username, "password": user_password,
+    "priv": win32netcon.USER_PRIV_USER, "home_dir": "", "comment": "Disposable RDP Guard CI",
+    "flags": win32netcon.UF_SCRIPT | win32netcon.UF_DONT_EXPIRE_PASSWD, "script_path": ""})
+try:
+    try:
+        win32net.NetLocalGroupAddMembers(None, "Users", 3, [{"domainandname": username}])
+    except pywintypes.error as exc:
+        if exc.winerror != 1378:  # NetUserAdd may have already assigned the default Users group.
+            raise
+    token = win32security.LogonUser(username, ".", user_password, win32security.LOGON32_LOGON_INTERACTIVE,
+                                   win32security.LOGON32_PROVIDER_DEFAULT)
+    try:
+        win32security.ImpersonateLoggedOnUser(token)
+        try:
+            try:
+                handle = win32file.CreateFile(r"\\.\pipe\RDPGuard.v1", 0x100003, 0, None, 3, 0, None)
+            except pywintypes.error as exc:
+                assert exc.winerror == 5, exc
+            else:
+                handle.Close()
+                raise AssertionError("Ordinary user could open the privileged named pipe")
+            try:
+                (Path(os.environ["ProgramData"]) / "RDPGuard" / "guard.db").read_bytes()
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("Ordinary user could read the protected database")
+        finally:
+            win32security.RevertToSelf()
+    finally:
+        win32api.CloseHandle(token)
+finally:
+    win32net.NetUserDel(None, username)
 
 manager = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
 service = win32service.OpenService(manager, "RDPGuardWeb", win32service.SERVICE_QUERY_CONFIG)
@@ -64,6 +109,12 @@ subprocess.run(["sc.exe", "stop", "RDPGuardWeb"], check=True, capture_output=Tru
 time.sleep(3)
 subprocess.run(["sc.exe", "stop", "RDPGuardService"], check=True, capture_output=True)
 time.sleep(3)
+backend = WindowsFirewall()
+FirewallEngine(backend).reconcile(["198.51.100.254"], 33345)
+data_dir = Path(os.environ["ProgramData"]) / "RDPGuard"
+(data_dir / "active-lease.json").write_text(json.dumps({"heartbeat": time.time() - 100, "deadline": time.time() - 1}), encoding="utf-8")
+subprocess.run([cli, "watchdog"], check=True)
+assert not any(owned(rule) for rule in backend.list_rules()), "Independent watchdog must remove its scoped rules"
 subprocess.run([cli, "emergency-disable"], check=True)
 assert (Path(os.environ["ProgramData"]) / "RDPGuard" / "emergency.disabled").exists()
 print("Frozen services, IPC authentication, web login, CSRF command, loopback binding and independent emergency cleanup passed.")

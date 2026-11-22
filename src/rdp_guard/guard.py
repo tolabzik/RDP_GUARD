@@ -1,6 +1,7 @@
 from contextlib import nullcontext
 from dataclasses import asdict
 import json
+import platform
 from pathlib import Path
 import threading
 import time
@@ -31,6 +32,8 @@ class Guard:
         self.last_sync = 0
         self.last_cleanup = 0
         self.last_heartbeat = 0
+        self.last_health = 0
+        self.platform_status = {}
         self.last_error = ""
         self.collectors = {}
         self.emergency_path = data_dir / "emergency.disabled"
@@ -166,6 +169,9 @@ class Guard:
                 with self.store.transaction() as db:
                     db.execute("UPDATE blocks SET ended=?,status='expired' WHERE ended IS NULL AND expires IS NOT NULL AND expires<=?",
                                (now, now))
+                if force or not self.platform_status or now - self.last_health >= 10:
+                    self.platform_status = self.safety.health(self.settings.rdp_port)
+                    self.last_health = now
                 if self.mode == "ACTIVE":
                     if not self.lease_path.exists():
                         raise RuntimeError("Active lease is missing")
@@ -175,8 +181,7 @@ class Guard:
                         self._set_monitor("watchdog", "activation-timeout")
                         return
                     sessions = self.protected()
-                    health = self.safety.health(self.settings.rdp_port)
-                    if not health["firewall"]:
+                    if not self.platform_status["firewall"]:
                         raise RuntimeError("Windows Firewall is unavailable or disabled on an active profile")
                     if force or now - self.last_sync >= self.settings.firewall_interval_seconds:
                         self._sync(sessions)
@@ -242,6 +247,7 @@ class Guard:
             "administrative_whitelist": admin_white, "no_list_overlap": not collisions,
             "managed_rule_ownership": not foreign,
             "security_subscription": self.collectors.get(SECURITY, {}).get("healthy", False),
+            "audit_logon_success_failure": health.get("audit_logon", False),
         }
         return {"checks": checks, "ready": all(checks.values()), "sessions": sessions,
                 "dry_run": [{"network": b["network"], "status": b["status"]} for b in blocks],
@@ -331,6 +337,7 @@ class Guard:
                                     "FROM events WHERE event_id=4625 AND ip IS NOT NULL AND timestamp>=? GROUP BY 1 ORDER BY 1",
                                     (now - 3600,))
         return {"version": __version__, "mode": self.mode, "uptime": int(now - self.started), "now": now,
+                "os": platform.platform(), "platform": self.platform_status,
                 "counters": counters, "blocks": blocks, "histogram": histogram,
                 "whitelist_count": self.store.rows("SELECT COUNT(*) n FROM whitelist")[0]["n"],
                 "last_error": self.last_error, "collectors": self.collectors,

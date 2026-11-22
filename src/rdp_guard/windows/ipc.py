@@ -128,7 +128,9 @@ class PipeClient:
         import win32file
         import win32pipe
         win32pipe.WaitNamedPipe(PIPE_NAME, 5000)
-        handle = win32file.CreateFile(PIPE_NAME, 0x100003, 0, None, win32con.OPEN_EXISTING,
+        # FILE_WRITE_ATTRIBUTES is required to select message-read mode. Explicit rights omit
+        # FILE_CREATE_PIPE_INSTANCE, unlike GENERIC_WRITE (which would weaken the server ACL).
+        handle = win32file.CreateFile(PIPE_NAME, 0x12019B, 0, None, win32con.OPEN_EXISTING,
                                      win32con.FILE_FLAG_OVERLAPPED | 0x00100000 | 0x00010000, None)
         try:
             verify_server(handle)

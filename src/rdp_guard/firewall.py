@@ -21,6 +21,13 @@ class Rule:
     action: int = 0
     profiles: int = 2147483647
     enabled: bool = True
+    local_addresses: str = "*"
+    remote_ports: str = "*"
+    application: str = ""
+    service: str = ""
+    interface_types: str = "All"
+    restricted_interfaces: bool = False
+    edge_traversal: bool = False
 
 
 def owned(rule: Rule) -> bool:
@@ -54,7 +61,11 @@ class FirewallEngine:
 
     def reconcile(self, addresses, port, batch_size=200):
         desired = {r.name: r for r in plan_rules(addresses, port, batch_size)}
-        current = {r.name: r for r in self.backend.list_rules()}
+        current_rules = self.backend.list_rules()
+        current = {r.name: r for r in current_rules}
+        relevant_names = [r.name for r in current_rules if owned(r) or r.name in desired]
+        if len(relevant_names) != len(set(relevant_names)):
+            raise RuntimeError("Ambiguous duplicate managed firewall rule names")
         for name in desired:
             if name in current and not owned(current[name]):
                 raise RuntimeError(f"Refusing to overwrite a foreign rule: {name}")

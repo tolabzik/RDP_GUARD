@@ -117,8 +117,9 @@ class WindowsSafety:
         import winreg
         import win32com.client
         result = {"firewall": False, "listening": False, "port_matches": False,
-                  "allow_rules": False, "watchdog": False, "errors": []}
+                  "allow_rules": False, "watchdog": False, "audit_logon": False, "errors": []}
         try:
+            result["audit_logon"] = audit_logon_enabled()
             result["listening"] = any(c.status == "LISTEN" and c.laddr.port == port
                                       for c in psutil.net_connections(kind="tcp"))
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
@@ -153,6 +154,7 @@ class WindowsSafety:
                         if rule.Profiles & profile:
                             covered.add((profile, rule.Protocol))
                 result["allow_rules"] = all((p, proto) in covered for p in profiles for proto in (6, 17)) and bool(profiles)
+                rule = policy = None  # Release COM proxies before apartment uninitialization.
         except Exception as exc:
             result["errors"].append(str(exc))
         try:
@@ -168,6 +170,7 @@ class WindowsSafety:
                     actions.Item(1).Arguments.strip() == "watchdog" and
                     definition.Principal.UserId.upper() in ("SYSTEM", "S-1-5-18", "NT AUTHORITY\\SYSTEM") and
                     task.LastTaskResult == 0 and (self._watchdog_age() < 150))
+                actions = definition = task = scheduler = None
         except Exception as exc:
             result["errors"].append(str(exc))
         return result
@@ -191,6 +194,29 @@ def port_in_rule(value, port):
             except ValueError:
                 pass
     return False
+
+
+def audit_logon_enabled():
+    """Read effective Logon success/failure auditing through the native advanced audit API."""
+    from ctypes import wintypes
+    import uuid
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", wintypes.DWORD), ("d2", wintypes.WORD), ("d3", wintypes.WORD), ("d4", ctypes.c_ubyte * 8)]
+    class AuditInfo(ctypes.Structure):
+        _fields_ = [("subcategory", GUID), ("flags", wintypes.DWORD), ("category", GUID)]
+    dll = ctypes.WinDLL("advapi32", use_last_error=True)
+    dll.AuditQuerySystemPolicy.argtypes = [ctypes.POINTER(GUID), wintypes.ULONG, ctypes.POINTER(ctypes.POINTER(AuditInfo))]
+    dll.AuditQuerySystemPolicy.restype = wintypes.BOOL
+    dll.AuditFree.argtypes = [ctypes.c_void_p]
+    dll.AuditFree.restype = None
+    guid = GUID.from_buffer_copy(uuid.UUID("0cce9215-69ae-11d9-bed3-505054503030").bytes_le)
+    info = ctypes.POINTER(AuditInfo)()
+    if not dll.AuditQuerySystemPolicy(ctypes.byref(guid), 1, ctypes.byref(info)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return info.contents.flags & 3 == 3
+    finally:
+        dll.AuditFree(info)
 
 
 def remote_allowed(value, ip):

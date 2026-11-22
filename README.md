@@ -4,6 +4,10 @@
 
 **Текущий выпуск: 1.0.0-rc.1, предварительный.** Начальный режим — **MONITOR ONLY**. Приёмка на целевой системе с RDS, Kaspersky Endpoint Security 14.2, SQL Server и 1С обязательна перед production ACTIVE. Репозиторий и CI не подключаются к рабочему серверу.
 
+![Панель RDP Guard с искусственными событиями проверки](docs/images/dashboard.jpg)
+
+На снимке — искусственные события локальной проверки интерфейса, не данные рабочего сервера.
+
 ## Готовая сборка
 
 [Скачать Windows x64 из Releases](https://github.com/tolabzik/RDP_GUARD/releases). Архив содержит `rdpguard.exe`, `guardservice.exe`, `webservice.exe`, общую папку `_internal`, скрипты установки/обновления/удаления и документацию. Python, Node.js, Docker и интернет на сервере не нужны. Рядом публикуется SHA-256. Бинарники пока без Authenticode-подписи.

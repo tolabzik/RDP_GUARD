@@ -107,6 +107,8 @@ async function dashboard() {
   if(s.lease?.deadline) content.push(el("section",{class:"banner"},el("div",{},el("h2",{},"Ожидается повторное RDP-подключение"),
     el("p",{},`Автоматический откат: ${fmt(s.lease.deadline)}`)),button("Подключение проверено",()=>confirmAction("Подтвердить подключение","Подтверждение принимается только после нового административного RDP-входа или переподключения, зафиксированного в журнале.",()=>api("confirm-active")),"primary")));
   if(s.last_error) content.push(el("div",{class:"banner"},badge("ОШИБКА","bad"),s.last_error));
+  content.push(el("div",{class:"toolbar"},badge(s.platform?.firewall ? "Windows Firewall · OK" : "Windows Firewall · требуется проверка",s.platform?.firewall ? "good" : "warn"),
+    badge(s.collectors.Security?.healthy ? "Event Log · подписка активна" : "Event Log · требуется проверка",s.collectors.Security?.healthy ? "good" : "warn")));
   const applied=s.blocks.find(b=>b.status==="applied")?.n || 0;
   content.push(el("div",{class:"cards"},[
     ["Неудачных входов · 24 ч",number(s.counters.day.n),`${number(s.counters.hour.n)} за последний час`],
@@ -177,7 +179,7 @@ async function systemView() {
   const [s,audit]=await Promise.all([api("health"),api("audit")]);
   const statuses=el("div",{},...Object.entries(s.platform).filter(([k])=>k!=="errors").map(([k,v])=>el("div",{class:"status-row"},k,badge(v ? "OK" : "ТРЕБУЕТ ПРОВЕРКИ",v ? "good" : "warn"))),
     ...Object.entries(s.collectors).map(([name,data])=>el("div",{class:"status-row"},el("span",{},name,el("small",{class:"muted"},data.error)),badge(data.healthy ? "Подписка активна" : "Ошибка",data.healthy ? "good" : "bad"))));
-  return [panel("Состояние компонентов",el("div",{},el("p",{class:"muted"},`Версия ${s.version} · Служба работает ${Math.floor(s.uptime/60)} мин. · ${s.mode}`),statuses,
+  return [panel("Состояние компонентов",el("div",{},el("p",{class:"muted"},`Версия ${s.version} · ${s.os} · Служба работает ${Math.floor(s.uptime/60)} мин. · ${s.mode}`),statuses,
     el("pre",{},JSON.stringify({integrity:s.integrity,last_error:s.last_error,errors:s.platform.errors},null,2))),[
       button("Экспорт диагностики",async()=>download("rdpguard-diagnostics.json",await api("diagnostics"))),button("Экспорт конфигурации",async()=>download("rdpguard-config.json",await api("export-config"))),
       button("Сверить firewall",()=>confirmAction("Сверка firewall","Будут обновлены только собственные правила RDP Guard в соответствии с текущим режимом.",()=>api("firewall-reconcile")))]),

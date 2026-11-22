@@ -21,7 +21,7 @@ class Safety:
     def __init__(self):
         self.ok = True
         self.admin_sessions = [{"id": 2, "ip": "203.0.113.10", "username": "administrator", "domain": "SERVER"}]
-        self.checks = dict.fromkeys(("firewall", "listening", "port_matches", "allow_rules", "watchdog"), True)
+        self.checks = dict.fromkeys(("firewall", "listening", "port_matches", "allow_rules", "watchdog", "audit_logon"), True)
 
     def sessions(self):
         return {"healthy": self.ok, "sessions": self.admin_sessions}

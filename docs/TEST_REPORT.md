@@ -4,6 +4,8 @@
 
 В разработке выполнены автоматизированные unit/integration-тесты ядра, SQLite, API и безопасности панели на macOS / Python 3.13: **72 passed** на первом полном прогоне. Ruff и синтаксис обоих браузерных JavaScript-файлов проверены. Нативные Windows API на macOS не запускались.
 
+Дополнительно проверены вход, dashboard, форма настроек, тёмная и светлая темы в браузере при узком и настольном viewport. Снимок находится в `docs/images/dashboard.jpg`, данные искусственные. Синтетическая локальная запись 1000 событий типа 3 в SQLite WAL с транзакционными bookmarks заняла около 0,18 секунды (5622 события/с); это измерение ядра на машине разработки, не доказательство end-to-end производительности Windows-сборщика.
+
 Проверяются: порог, окно, дедупликация, повторно используемые Record ID, atomic bookmark, парсинг/NTSTATUS, тип 3 vs 10, whitelist и активные администраторы, недостоверная WTS-информация, TTL/эскалация, IPv4/mapped/IPv6, Monitor Only, circuit breaker, ошибки/read-back firewall, ownership, пустые списки, запрет wildcard, активация/откат/подтверждение, atomic import, безопасные параметры, Argon2id, CSRF, loopback, Origin/Host, session expiry/logout, login throttling, подмена RPC-идентичности и экспорт без секретов.
 
 ## Проверки GitHub Actions
