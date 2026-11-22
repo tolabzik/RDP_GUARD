@@ -169,7 +169,8 @@ class WindowsSafety:
                     actions.Item(1).Path.casefold() == expected.casefold() and
                     actions.Item(1).Arguments.strip() == "watchdog" and
                     definition.Principal.UserId.upper() in ("SYSTEM", "S-1-5-18", "NT AUTHORITY\\SYSTEM") and
-                    task.LastTaskResult == 0 and (self._watchdog_age() < 150))
+                    (task.LastTaskResult == 0 or (task.LastTaskResult == 267009 and task.State == 4)) and
+                    (self._watchdog_age() < 150))
                 actions = definition = task = scheduler = None
         except Exception as exc:
             result["errors"].append(str(exc))

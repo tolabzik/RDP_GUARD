@@ -55,3 +55,47 @@ def test_web_rejects_administrative_process():
     from rdp_guard.windows.platform import require_unprivileged
     with pytest.raises(PermissionError):
         require_unprivileged()
+
+
+def test_native_logon_audit_api():
+    from rdp_guard.windows.platform import audit_logon_enabled
+    assert isinstance(audit_logon_enabled(), bool)
+
+
+def test_native_named_pipe_identity_and_message_roundtrip(monkeypatch):
+    import threading
+    import uuid
+    import pywintypes
+    import win32con
+    import win32file
+    import win32pipe
+    import win32security
+    from rdp_guard.windows import ipc
+    attributes = pywintypes.SECURITY_ATTRIBUTES()
+    attributes.SECURITY_DESCRIPTOR = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+        "D:P(A;;GA;;;SY)(A;;GA;;;BA)", 1)
+    name = r"\\.\pipe\RDPGuard.Test." + uuid.uuid4().hex
+    monkeypatch.setattr(ipc, "PIPE_NAME", name)
+    monkeypatch.setattr(ipc, "security_attributes", lambda: (attributes, "S-1-5-80-0"))
+    stop = threading.Event()
+    def dispatch(request, identity):
+        assert identity["role"] == "admin"
+        return {"echo": request["op"], "role": identity["role"]}
+    server = ipc.PipeServer(dispatch, stop)
+    server.start()
+    assert server.ready.wait(10) and not server.error
+    handle = None
+    try:
+        handle = win32file.CreateFile(name, 0x12019B, 0, None, win32con.OPEN_EXISTING,
+                                     win32con.FILE_FLAG_OVERLAPPED | 0x00100000 | 0x00010000, None)
+        win32pipe.SetNamedPipeHandleState(handle, win32pipe.PIPE_READMODE_MESSAGE, None, None)
+        ipc.write_message(handle, {"op": "status"}, ipc.MAX_REQUEST)
+        response = ipc.read_message(handle, ipc.MAX_RESPONSE)
+        assert response == {"ok": True, "result": {"echo": "status", "role": "admin"}}
+        ipc.write_message(handle, {"ack": True}, 1024)
+    finally:
+        if handle:
+            handle.Close()
+        stop.set()
+        server.join(15)
+    assert not server.is_alive() and not server.error

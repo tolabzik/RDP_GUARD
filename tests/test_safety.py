@@ -98,6 +98,42 @@ def test_missing_lease_inhibits_protection(guard):
     assert guard.mode == "MONITOR ONLY"
 
 
+def test_stale_startup_lease_cannot_be_renewed(guard):
+    from rdp_guard.guard import Guard
+    activate(guard)
+    failures(guard)
+    guard.clock.now += 46
+    restarted = Guard(guard.store, guard.firewall.backend, guard.safety, guard.data_dir, guard.clock)
+    restarted.tick(force=True)
+    assert restarted.mode == "MONITOR ONLY"
+    assert not guard.firewall.backend.list_rules()
+
+
+def test_lost_watchdog_inhibits_active_protection(guard):
+    activate(guard)
+    failures(guard)
+    guard.safety.checks["watchdog"] = False
+    with pytest.raises(RuntimeError, match="watchdog"):
+        guard.tick(force=True)
+    guard.tick(force=True)
+    assert guard.mode == "MONITOR ONLY"
+    assert not guard.firewall.backend.list_rules()
+
+
+def test_disabled_windows_logon_audit_blocks_activation(guard):
+    guard.dispatch("whitelist-add", {"network": "203.0.113.10"}, "test")
+    guard.safety.checks["audit_logon"] = False
+    assert guard.preflight()["checks"]["audit_logon_success_failure"] is False
+
+
+def test_readback_repairs_additional_scope_restrictions():
+    backend = MemoryFirewall()
+    correct = plan_rules(["198.51.100.7"], 33345)[0]
+    backend.rules[correct.name] = replace(correct, application=r"C:\unexpected.exe", local_addresses="192.0.2.1")
+    FirewallEngine(backend).reconcile(["198.51.100.7"], 33345)
+    assert backend.rules[correct.name] == correct
+
+
 def test_reactivation_does_not_apply_monitor_proposals(guard):
     failures(guard)
     activate(guard)

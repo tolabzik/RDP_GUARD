@@ -43,14 +43,26 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -e ".[build,test]"
+      - name: Resolve package version
+        id: package
+        shell: pwsh
+        run: |
+          $Version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.0.0-rc.1' }
+          if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw 'Invalid release tag.' }
+          "version=$Version" >> $env:GITHUB_OUTPUT
       - name: Build Windows x64 distribution
         shell: pwsh
-        run: ./scripts/Build.ps1
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: ./scripts/Build.ps1 -Version $env:PACKAGE_VERSION
       - name: Install and test frozen services on isolated Windows Server runner
         shell: powershell
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
         run: |
-          Copy-Item scripts/Test-Installed.ps1,scripts/test_installed.py dist/RDPGuard-1.0.0-rc.1-win-x64
-          & dist/RDPGuard-1.0.0-rc.1-win-x64/Test-Installed.ps1
+          $Staging = "dist/RDPGuard-$env:PACKAGE_VERSION-win-x64"
+          Copy-Item scripts/Test-Installed.ps1,scripts/test_installed.py $Staging
+          & "$Staging/Test-Installed.ps1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -58,7 +70,7 @@ jobs:
           path: test-results/
       - uses: actions/upload-artifact@v4
         with:
-          name: RDPGuard-1.0.0-rc.1-win-x64
+          name: RDPGuard-windows-x64
           path: |
             dist/*.zip
             dist/*.sha256
@@ -74,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: RDPGuard-1.0.0-rc.1-win-x64
+          name: RDPGuard-windows-x64
           path: release
       - name: Publish tested binaries and checksums
         env:

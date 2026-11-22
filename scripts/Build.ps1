@@ -4,6 +4,8 @@ $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw 'Invalid package version.' }
 Push-Location (Split-Path $PSScriptRoot -Parent)
 try {
+    python -c "import sys; from packaging.version import Version; from rdp_guard import __version__; assert Version(sys.argv[1]) == Version(__version__), 'Package/tag version must match the source version'" $Version
+    if ($LASTEXITCODE -ne 0) { throw 'Package/source version mismatch.' }
     python -m PyInstaller --noconfirm --clean rdpguard.spec
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed.' }
     & '.\dist\RDPGuard\rdpguard.exe' --version

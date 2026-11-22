@@ -27,9 +27,8 @@ def security_attributes():
 
 def peer_identity(handle, web_sid):
     import win32api
-    import win32pipe
     import win32security
-    win32pipe.ImpersonateNamedPipeClient(handle)
+    win32security.ImpersonateNamedPipeClient(handle)
     try:
         token = win32security.OpenThreadToken(win32api.GetCurrentThread(), win32security.TOKEN_QUERY, True)
         try:

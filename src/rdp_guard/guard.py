@@ -38,6 +38,17 @@ class Guard:
         self.collectors = {}
         self.emergency_path = data_dir / "emergency.disabled"
         self.lease_path = data_dir / "active-lease.json"
+        # Do not renew a stale lease on startup before the independent watchdog can inspect it.
+        if self.mode == "ACTIVE":
+            try:
+                lease = json.loads(self.lease_path.read_text(encoding="utf-8"))
+                stale = clock() - lease["heartbeat"] > 45 or lease["heartbeat"] > clock() + 10
+            except (OSError, ValueError, KeyError, TypeError):
+                stale = True
+            if stale:
+                self.store.set("mode", "MONITOR ONLY")
+                self.store.set("cleanup_requested", True)
+                self.store.audit("guard", "stale-startup-lease", {}, clock())
 
     @property
     def mode(self):
@@ -183,6 +194,8 @@ class Guard:
                     sessions = self.protected()
                     if not self.platform_status["firewall"]:
                         raise RuntimeError("Windows Firewall is unavailable or disabled on an active profile")
+                    if not self.platform_status.get("watchdog"):
+                        raise RuntimeError("Independent rollback watchdog is unavailable")
                     if force or now - self.last_sync >= self.settings.firewall_interval_seconds:
                         self._sync(sessions)
                         self.last_sync = now
