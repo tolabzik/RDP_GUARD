@@ -1,4 +1,5 @@
 """End-to-end check of the actual frozen services on an isolated Actions Windows runner."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -100,6 +101,22 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
     response = client.post("/api/rpc", headers=headers, json={"op": "status"})
     assert response.status_code == 200, response.text
     assert response.json()["mode"] == "MONITOR ONLY"
+    # The browser sends status/events together. Exercise the actual LocalService -> SYSTEM
+    # boundary repeatedly, including more clients than the pipe server's four workers.
+    def dashboard_call(operation):
+        response = client.post("/api/rpc", headers=headers, json={"op": operation})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        if operation == "status":
+            assert result["mode"] == "MONITOR ONLY"
+        return result
+    for workers in (2, 8):
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for _ in range(10):
+                list(pool.map(dashboard_call, ["status", "events"] * (workers // 2)))
+    status = subprocess.run([cli, "status"], capture_output=True, text=True, timeout=20, check=True)
+    assert json.loads(status.stdout)["mode"] == "MONITOR ONLY"
+    print("100 concurrent dashboard RPC requests and subsequent CLI status passed.")
     response = client.post("/api/rpc", headers=headers, json={"op": "activate", "args": {"confirmation": "ENABLE RDP GUARD", "backup_access": True}})
     assert response.status_code == 400, "RDP is not configured on 33345; activation must fail"
 

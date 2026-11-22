@@ -63,6 +63,15 @@ def test_native_logon_audit_api():
 
 
 def test_native_named_pipe_client_connects_before_accept():
+    import subprocess
+    from pathlib import Path
+    # The old implementation can also hang while cancelling a connect that was never pending.
+    # Isolate it so a regression fails promptly instead of hanging the entire Windows job.
+    code = "import runpy; runpy.run_path(" + repr(str(Path(__file__).resolve())) + ")[\"_preconnected_roundtrip\"]()"
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
+
+
+def _preconnected_roundtrip():
     """CreateFile can complete before ConnectNamedPipe has started its overlapped wait."""
     import uuid
     import win32con
@@ -122,6 +131,46 @@ def test_native_named_pipe_identity_and_message_roundtrip(monkeypatch):
     finally:
         if handle:
             handle.Close()
+        stop.set()
+        server.join(15)
+    assert not server.is_alive() and not server.error
+
+
+@pytest.mark.parametrize("clients", [2, 8])
+def test_native_named_pipe_concurrent_clients(monkeypatch, clients):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import uuid
+    import pywintypes
+    import win32security
+    from rdp_guard.windows import ipc
+    attributes = pywintypes.SECURITY_ATTRIBUTES()
+    attributes.SECURITY_DESCRIPTOR = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+        "D:P(A;;GA;;;SY)(A;;GA;;;BA)", 1)
+    monkeypatch.setattr(ipc, "PIPE_NAME", r"\\.\pipe\RDPGuard.Test." + uuid.uuid4().hex)
+    monkeypatch.setattr(ipc, "security_attributes", lambda: (attributes, "S-1-5-80-0"))
+    # This test has no installed SCM service; the frozen-service smoke test covers verification.
+    monkeypatch.setattr(ipc, "verify_server", lambda handle: None)
+    stop = threading.Event()
+    seen = []
+    def dispatch(request, identity):
+        assert identity["role"] == "admin"
+        seen.append(request["id"])
+        return request["id"]
+    server = ipc.PipeServer(dispatch, stop)
+    server.start()
+    assert server.ready.wait(10) and not server.error
+    try:
+        with ThreadPoolExecutor(max_workers=clients) as pool:
+            for batch in range(20):
+                barrier = threading.Barrier(clients)
+                def request(number):
+                    barrier.wait(timeout=10)
+                    return ipc.PipeClient().call({"id": number})
+                numbers = list(range(batch * clients, (batch + 1) * clients))
+                assert list(pool.map(request, numbers)) == numbers
+        assert sorted(seen) == list(range(20 * clients))  # No dropped or replayed requests.
+    finally:
         stop.set()
         server.join(15)
     assert not server.is_alive() and not server.error

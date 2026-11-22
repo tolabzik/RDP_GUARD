@@ -4,6 +4,7 @@ from ctypes import wintypes
 import json
 import logging
 import threading
+import time
 
 from ..auth import AuthenticationError, RateLimitError
 from .platform import PIPE_NAME
@@ -54,7 +55,11 @@ def _overlapped(handle, start, timeout=10000, stop=None):
     ov.hEvent = win32event.CreateEvent(None, True, False, None)
     try:
         try:
-            start(ov)
+            result = start(ov)
+            # pywin32 returns ERROR_PIPE_CONNECTED (it does not raise it). No I/O
+            # was queued in this race, so the OVERLAPPED event will never signal.
+            if result == 535:
+                return 0
         except pywintypes.error as exc:
             if exc.winerror == 535:  # Client connected between CreateNamedPipe and ConnectNamedPipe.
                 return 0
@@ -123,16 +128,38 @@ def verify_server(handle):
         win32service.CloseServiceHandle(manager)
 
 
+def _connect(timeout=5000):
+    import pywintypes
+    import win32con
+    import win32file
+    import win32pipe
+    deadline = time.monotonic() + timeout / 1000
+    while True:
+        try:
+            # FILE_WRITE_ATTRIBUTES selects message-read mode. Omit FILE_CREATE_PIPE_INSTANCE,
+            # unlike GENERIC_WRITE, and retain identification-only impersonation protection.
+            return win32file.CreateFile(PIPE_NAME, 0x12019B, 0, None, win32con.OPEN_EXISTING,
+                                       win32con.FILE_FLAG_OVERLAPPED | 0x00100000 | 0x00010000, None)
+        except pywintypes.error as exc:
+            if exc.winerror != 231:  # ERROR_PIPE_BUSY: another client claimed the available instance.
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Named pipe connection timed out") from exc
+            try:
+                win32pipe.WaitNamedPipe(PIPE_NAME, max(1, int(remaining * 1000)))
+            except pywintypes.error as wait_error:
+                if wait_error.winerror == 121:
+                    raise TimeoutError("Named pipe connection timed out") from wait_error
+                raise
+            # WaitNamedPipe does not reserve the instance. Retry only opening the handle;
+            # once a request is sent it must never be replayed, especially a mutation.
+
+
 class PipeClient:
     def call(self, request):
-        import win32con
-        import win32file
         import win32pipe
-        win32pipe.WaitNamedPipe(PIPE_NAME, 5000)
-        # FILE_WRITE_ATTRIBUTES is required to select message-read mode. Explicit rights omit
-        # FILE_CREATE_PIPE_INSTANCE, unlike GENERIC_WRITE (which would weaken the server ACL).
-        handle = win32file.CreateFile(PIPE_NAME, 0x12019B, 0, None, win32con.OPEN_EXISTING,
-                                     win32con.FILE_FLAG_OVERLAPPED | 0x00100000 | 0x00010000, None)
+        handle = _connect()
         try:
             verify_server(handle)
             win32pipe.SetNamedPipeHandleState(handle, win32pipe.PIPE_READMODE_MESSAGE, None, None)
