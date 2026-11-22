@@ -64,7 +64,9 @@ def _overlapped(handle, start, timeout=10000, stop=None):
         while win32event.WaitForSingleObject(ov.hEvent, 250) != win32event.WAIT_OBJECT_0:
             elapsed += 250
             if elapsed >= timeout or (stop and stop.is_set()):
-                win32file.CancelIoEx(handle, ov)
+                # This same thread issued the sole outstanding operation on this handle.
+                # pywin32 exposes CancelIo; it does not expose CancelIoEx in supported builds.
+                win32file.CancelIo(handle)
                 try:
                     win32file.GetOverlappedResult(handle, ov, True)
                 except pywintypes.error:
