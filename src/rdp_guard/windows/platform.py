@@ -72,6 +72,10 @@ def firewall_mutex():
 
 
 class WindowsSafety:
+    def __init__(self):
+        from .sessions import SessionSourceResolver
+        self._sources = SessionSourceResolver()
+
     def sessions(self):
         import win32security
         import win32ts
@@ -85,29 +89,38 @@ class WindowsSafety:
                     return win32ts.WTSQuerySessionInformation(None, session_id, field)
                 if query(win32ts.WTSClientProtocolType) != 2:
                     continue
+                started = self._sources.read_clock(session_id)
                 token = win32ts.WTSQueryUserToken(session_id)
                 try:
                     groups = win32security.GetTokenInformation(token, win32security.TokenGroups)
+                    user_sid = win32security.ConvertSidToStringSid(
+                        win32security.GetTokenInformation(token, win32security.TokenUser)[0])
                     # Include deny-only admin groups: a UAC-filtered administrator still needs protection.
                     admin = any(win32security.ConvertSidToStringSid(sid) == "S-1-5-32-544" for sid, _ in groups)
                 finally:
                     token.Close()
                 if not admin:
                     continue
-                client = query(win32ts.WTSClientAddress)
-                if client is None:
-                    raise RuntimeError("Missing administrative RDP client address")
-                family, raw = client["AddressFamily"], bytes(client["Address"])
-                if family == socket.AF_INET:
-                    ip = address(socket.inet_ntop(socket.AF_INET, raw[2:6]))
-                elif family == socket.AF_INET6:
-                    # WTS does not reliably provide IPv6 client addresses on all RDS versions.
-                    # Refuse active protection unless the address can be independently verified.
-                    raise RuntimeError("IPv6 administrative session address cannot be verified by WTS")
-                else:
-                    raise RuntimeError("Unsupported administrative session address family")
-                sessions.append({"id": session_id, "ip": ip, "username": query(win32ts.WTSUserName),
-                                 "domain": query(win32ts.WTSDomainName)})
+                username, domain = query(win32ts.WTSUserName), query(win32ts.WTSDomainName)
+                try:
+                    proof = self._sources.resolve(session_id, user_sid, username, domain, expected_clock=started)
+                except Exception as exc:
+                    raise RuntimeError(f"Session {session_id} ({domain}\\{username}): {exc}") from exc
+                # Client-provided WTSClientAddress can be private/absent behind NAT or a gateway.
+                # Keep it as diagnostics only; it never determines whitelist or firewall scope.
+                reported = None
+                try:
+                    client = query(win32ts.WTSClientAddress)
+                    if client:
+                        family, raw = client["AddressFamily"], bytes(client["Address"])
+                        if family == socket.AF_INET:
+                            reported = address(socket.inet_ntop(socket.AF_INET, raw[2:6]))
+                        elif family == socket.AF_INET6:
+                            reported = address(socket.inet_ntop(socket.AF_INET6, raw[:16]))
+                except Exception:
+                    pass
+                sessions.append({"id": session_id, "username": username, "domain": domain,
+                                 "client_reported_ip": reported, **proof})
             return {"healthy": True, "sessions": sessions}
         except Exception as exc:
             return {"healthy": False, "sessions": sessions, "error": str(exc)}
@@ -134,6 +147,8 @@ class WindowsSafety:
                 result["firewall"] = bool(profiles) and all(policy.FirewallEnabled(p) and
                     not policy.BlockAllInboundTraffic(p) for p in profiles) and policy.LocalPolicyModifyState == 0
                 active_sessions = self.sessions()
+                if not active_sessions["healthy"]:
+                    result["errors"].append(active_sessions.get("error", "Cannot verify administrative RDP sessions"))
                 clients = [s["ip"] for s in active_sessions["sessions"]]
                 covered = set()
                 for rule in policy.Rules:
@@ -153,7 +168,8 @@ class WindowsSafety:
                     for profile in profiles:
                         if rule.Profiles & profile:
                             covered.add((profile, rule.Protocol))
-                result["allow_rules"] = all((p, proto) in covered for p in profiles for proto in (6, 17)) and bool(profiles)
+                result["allow_rules"] = (active_sessions["healthy"] and bool(profiles) and
+                    all((p, proto) in covered for p in profiles for proto in (6, 17)))
                 rule = policy = None  # Release COM proxies before apartment uninitialization.
         except Exception as exc:
             result["errors"].append(str(exc))

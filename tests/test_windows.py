@@ -75,6 +75,29 @@ def test_native_system_principal_resolution_uses_machine_locale():
     assert principal_sid(domain + "\\" + name) != "S-1-5-18"
 
 
+def test_native_extended_session_clock():
+    import ctypes
+    import time
+    import win32ts
+    from rdp_guard.windows.sessions import FILETIME_EPOCH, session_clock
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.ProcessIdToSessionId.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+    kernel.ProcessIdToSessionId.restype = ctypes.c_int
+    session_id = ctypes.c_uint32()
+    assert kernel.ProcessIdToSessionId(os.getpid(), ctypes.byref(session_id))
+    result = session_clock(session_id.value)
+    assert result["id"] == session_id.value
+    assert result["state"] == win32ts.WTSQuerySessionInformation(None, session_id.value, win32ts.WTSConnectState)
+    if result["current_ticks"]:
+        assert abs((result["current_ticks"] - FILETIME_EPOCH) / 10_000_000 - time.time()) < 30
+
+
+def test_native_session_source_xpath_and_empty_result():
+    from rdp_guard.windows.sessions import latest_connection_event
+    with pytest.raises(RuntimeError, match="No server RDP connection event"):
+        latest_connection_event(0xFFFFFFFE)
+
+
 def test_native_named_pipe_client_connects_before_accept():
     import subprocess
     from pathlib import Path

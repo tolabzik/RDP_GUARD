@@ -60,7 +60,8 @@ class Guard:
     def protected(self):
         snapshot = self.safety.sessions()
         if not snapshot["healthy"]:
-            raise RuntimeError("Cannot verify current administrative RDP sessions")
+            detail = snapshot.get("error", "Session inventory is unavailable")
+            raise RuntimeError(f"Cannot verify current administrative RDP sessions: {detail}")
         return snapshot["sessions"]
 
     def ingest(self, xml: str, channel: str, bookmark: str):
@@ -241,11 +242,13 @@ class Guard:
 
     def preflight(self):
         health = self.safety.health(self.settings.rdp_port)
+        session_error = ""
         try:
             sessions = self.protected()
             session_ok = True
-        except RuntimeError:
+        except RuntimeError as exc:
             sessions, session_ok = [], False
+            session_error = str(exc)
         white = self.store.rows("SELECT * FROM whitelist")
         blocks = self.store.rows("SELECT * FROM blocks WHERE ended IS NULL")
         sessions = [s | {"whitelisted": self.trusted(s["ip"])} for s in sessions]
@@ -263,7 +266,7 @@ class Guard:
             "security_subscription": self.collectors.get(SECURITY, {}).get("healthy", False),
             "audit_logon_success_failure": health.get("audit_logon", False),
         }
-        return {"checks": checks, "ready": all(checks.values()), "sessions": sessions,
+        return {"checks": checks, "ready": all(checks.values()), "sessions": sessions, "session_error": session_error,
                 "dry_run": [{"network": b["network"], "status": b["status"]} for b in blocks],
                 "warning": "ACTIVE can interrupt RDP. Verify backup access, reconnect and confirm within the rollback period."}
 
