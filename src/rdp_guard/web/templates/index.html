@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ru" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RDP Guard · Панель защиты</title><link rel="stylesheet" href="/static/style.css"><script src="/static/app.js" defer></script></head>
+<body><aside class="sidebar"><a class="brand" href="/"><span class="brand-mark">RG</span><span>RDP Guard<small>SERVER SECURITY</small></span></a>
+<div class="nav-label">УПРАВЛЕНИЕ</div><nav aria-label="Главная навигация">
+<button data-view="dashboard" class="selected"><span>◫</span> Обзор</button><button data-view="events"><span>≋</span> События</button>
+<button data-view="blocks"><span>⊘</span> Блокировки</button><button data-view="whitelist"><span>✓</span> Белый список</button>
+<button data-view="settings"><span>⚙</span> Настройки</button><button data-view="system"><span>⌘</span> Система</button></nav>
+<div class="sidebar-bottom"><div class="local-note"><span class="dot"></span> Локальная панель<small>127.0.0.1:8787</small></div>
+<button id="theme" class="quiet">Светлая / тёмная тема</button><button id="logout" class="quiet">Выйти · {{ user }}</button></div></aside>
+<div class="workspace"><header><div><p class="eyebrow">RDP GUARD / LOCAL CONSOLE</p><h1 id="title">Обзор защиты</h1></div>
+<div class="header-actions"><span id="connection" class="muted">Подключение…</span><button id="refresh" class="quiet">↻ Обновить</button></div></header>
+<div id="notice" role="status" hidden></div><main id="content" aria-live="polite"></main>
+<footer>RDP Guard <span id="version"></span><span>Windows Event Log · Windows Defender Firewall</span></footer></div>
+<dialog id="modal"><form id="modal-form"><div class="dialog-head"><h2 id="modal-title"></h2><button type="button" id="close-modal" class="quiet" aria-label="Закрыть">✕</button></div>
+<div id="modal-body"></div><p id="modal-error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-modal" class="quiet">Отмена</button><button type="submit" class="primary">Подтвердить</button></div></form></dialog>
+</body></html>

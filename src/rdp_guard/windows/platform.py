@@ -1,0 +1,205 @@
+from contextlib import contextmanager
+import ctypes
+import ipaddress
+import os
+from pathlib import Path
+import socket
+import sys
+
+from ..models import address
+
+DATA_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "RDPGuard"
+PIPE_NAME = r"\\.\pipe\RDPGuard.v1"
+
+
+def require_windows():
+    if sys.platform != "win32":
+        raise RuntimeError("This command requires Windows")
+
+
+def require_admin():
+    require_windows()
+    if not ctypes.windll.shell32.IsUserAnAdmin():
+        raise PermissionError("Run this command from an elevated Administrator terminal")
+
+
+def require_unprivileged():
+    require_windows()
+    import win32api
+    import win32security
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32security.TOKEN_QUERY)
+    try:
+        sid = win32security.ConvertSidToStringSid(win32security.GetTokenInformation(token, win32security.TokenUser)[0])
+        groups = win32security.GetTokenInformation(token, win32security.TokenGroups)
+        admin_member = any(win32security.ConvertSidToStringSid(s) == "S-1-5-32-544" for s, _ in groups)
+        if sid == "S-1-5-18" or admin_member or ctypes.windll.shell32.IsUserAnAdmin():
+            raise PermissionError("The web process must not run as SYSTEM or an administrator")
+    finally:
+        token.Close()
+
+
+@contextmanager
+def com():
+    import pythoncom
+    pythoncom.CoInitialize()
+    try:
+        yield
+    finally:
+        pythoncom.CoUninitialize()
+
+
+@contextmanager
+def firewall_mutex():
+    import win32api
+    import win32event
+    import win32security
+    import pywintypes
+    attributes = pywintypes.SECURITY_ATTRIBUTES()
+    attributes.SECURITY_DESCRIPTOR = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+        "D:P(A;;GA;;;SY)(A;;GA;;;BA)", 1)
+    handle = win32event.CreateMutex(attributes, False, r"Global\RDPGuard.Firewall.v1")
+    acquired = False
+    try:
+        result = win32event.WaitForSingleObject(handle, 15000)
+        if result not in (win32event.WAIT_OBJECT_0, win32event.WAIT_ABANDONED):
+            raise TimeoutError("Firewall mutex timed out")
+        acquired = True
+        yield
+    finally:
+        if acquired:
+            win32event.ReleaseMutex(handle)
+        win32api.CloseHandle(handle)
+
+
+class WindowsSafety:
+    def sessions(self):
+        import win32security
+        import win32ts
+        sessions = []
+        try:
+            for item in win32ts.WTSEnumerateSessions(None, 1, 0):
+                if item["State"] != win32ts.WTSActive:
+                    continue
+                session_id = item["SessionId"]
+                def query(field):
+                    return win32ts.WTSQuerySessionInformation(None, session_id, field)
+                if query(win32ts.WTSClientProtocolType) != 2:
+                    continue
+                token = win32ts.WTSQueryUserToken(session_id)
+                try:
+                    groups = win32security.GetTokenInformation(token, win32security.TokenGroups)
+                    # Include deny-only admin groups: a UAC-filtered administrator still needs protection.
+                    admin = any(win32security.ConvertSidToStringSid(sid) == "S-1-5-32-544" for sid, _ in groups)
+                finally:
+                    token.Close()
+                if not admin:
+                    continue
+                client = query(win32ts.WTSClientAddress)
+                if client is None:
+                    raise RuntimeError("Missing administrative RDP client address")
+                family, raw = client["AddressFamily"], bytes(client["Address"])
+                if family == socket.AF_INET:
+                    ip = address(socket.inet_ntop(socket.AF_INET, raw[2:6]))
+                elif family == socket.AF_INET6:
+                    # WTS does not reliably provide IPv6 client addresses on all RDS versions.
+                    # Refuse active protection unless the address can be independently verified.
+                    raise RuntimeError("IPv6 administrative session address cannot be verified by WTS")
+                else:
+                    raise RuntimeError("Unsupported administrative session address family")
+                sessions.append({"id": session_id, "ip": ip, "username": query(win32ts.WTSUserName),
+                                 "domain": query(win32ts.WTSDomainName)})
+            return {"healthy": True, "sessions": sessions}
+        except Exception as exc:
+            return {"healthy": False, "sessions": sessions, "error": str(exc)}
+
+    def health(self, port):
+        import psutil
+        import winreg
+        import win32com.client
+        result = {"firewall": False, "listening": False, "port_matches": False,
+                  "allow_rules": False, "watchdog": False, "errors": []}
+        try:
+            result["listening"] = any(c.status == "LISTEN" and c.laddr.port == port
+                                      for c in psutil.net_connections(kind="tcp"))
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp") as key:
+                result["port_matches"] = winreg.QueryValueEx(key, "PortNumber")[0] == port
+        except Exception as exc:
+            result["errors"].append(str(exc))
+        try:
+            with com():
+                policy = win32com.client.Dispatch("HNetCfg.FwPolicy2")
+                profiles = [p for p in (1, 2, 4) if policy.CurrentProfileTypes & p]
+                result["firewall"] = bool(profiles) and all(policy.FirewallEnabled(p) and
+                    not policy.BlockAllInboundTraffic(p) for p in profiles) and policy.LocalPolicyModifyState == 0
+                active_sessions = self.sessions()
+                clients = [s["ip"] for s in active_sessions["sessions"]]
+                covered = set()
+                for rule in policy.Rules:
+                    if not rule.Enabled or rule.Direction != 1 or rule.Action != 1 or rule.Protocol not in (6, 17):
+                        continue
+                    if rule.ServiceName and rule.ServiceName.lower() != "termservice":
+                        continue
+                    app = (rule.ApplicationName or "").lower().replace("%systemroot%", os.environ.get("SystemRoot", r"C:\Windows").lower())
+                    if app and app != str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "svchost.exe").lower():
+                        continue
+                    if rule.LocalAddresses != "*" or rule.InterfaceTypes != "All" or rule.Interfaces:
+                        continue
+                    if not port_in_rule(rule.LocalPorts, port):
+                        continue
+                    if not clients or not all(remote_allowed(rule.RemoteAddresses, ip) for ip in clients):
+                        continue
+                    for profile in profiles:
+                        if rule.Profiles & profile:
+                            covered.add((profile, rule.Protocol))
+                result["allow_rules"] = all((p, proto) in covered for p in profiles for proto in (6, 17)) and bool(profiles)
+        except Exception as exc:
+            result["errors"].append(str(exc))
+        try:
+            with com():
+                scheduler = win32com.client.Dispatch("Schedule.Service")
+                scheduler.Connect()
+                task = scheduler.GetFolder("\\").GetTask("RDPGuardRollback")
+                definition = task.Definition
+                actions = definition.Actions
+                expected = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "RDPGuard" / "rdpguard.exe")
+                result["watchdog"] = (bool(task.Enabled) and actions.Count == 1 and
+                    actions.Item(1).Path.casefold() == expected.casefold() and
+                    actions.Item(1).Arguments.strip() == "watchdog" and
+                    definition.Principal.UserId.upper() in ("SYSTEM", "S-1-5-18", "NT AUTHORITY\\SYSTEM") and
+                    task.LastTaskResult == 0 and (self._watchdog_age() < 150))
+        except Exception as exc:
+            result["errors"].append(str(exc))
+        return result
+
+    @staticmethod
+    def _watchdog_age():
+        import time
+        return time.time() - (DATA_DIR / "watchdog.alive").stat().st_mtime
+
+
+def port_in_rule(value, port):
+    for part in value.split(","):
+        part = part.strip()
+        if part == "*" or part == str(port):
+            return True
+        if "-" in part:
+            try:
+                low, high = map(int, part.split("-"))
+                if low <= port <= high:
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
+def remote_allowed(value, ip):
+    if value == "*":
+        return True
+    for part in value.split(","):
+        try:
+            if ipaddress.ip_address(ip) in ipaddress.ip_network(part.strip(), strict=False):
+                return True
+        except ValueError:
+            pass
+    return False

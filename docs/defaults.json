@@ -1,0 +1,13 @@
+{
+  "threshold": 10,
+  "window_seconds": 300,
+  "ban_seconds": [3600, 86400, 604800],
+  "include_network_auth": false,
+  "rdp_port": 33345,
+  "max_blocks_per_minute": 20,
+  "max_block_entries": 4000,
+  "batch_size": 200,
+  "firewall_interval_seconds": 2,
+  "retention_days": 30,
+  "rollback_seconds": 180
+}
