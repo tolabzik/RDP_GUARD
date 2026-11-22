@@ -16,6 +16,7 @@ import win32net
 import win32netcon
 import win32security
 import pywintypes
+from rdp_guard import __version__
 from rdp_guard.firewall import FirewallEngine, owned
 from rdp_guard.windows.firewall import WindowsFirewall
 
@@ -117,6 +118,30 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
     status = subprocess.run([cli, "status"], capture_output=True, text=True, timeout=20, check=True)
     assert json.loads(status.stdout)["mode"] == "MONITOR ONLY"
     print("100 concurrent dashboard RPC requests and subsequent CLI status passed.")
+    # Exercise the shipped update path on an existing database and real service processes.
+    subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-File",
+                    str(Path(__file__).with_name("Update.ps1"))], check=True, timeout=120)
+    for _ in range(30):
+        try:
+            response = client.post("/api/rpc", headers=headers, json={"op": "status"})
+            if response.status_code == 200:
+                break
+        except httpx.TransportError:
+            pass
+        time.sleep(1)
+    else:
+        raise RuntimeError("Updated services did not resume the existing session")
+    assert response.json()["version"] == __version__
+    assert response.json()["mode"] == "MONITOR ONLY" and response.json()["emergency_disabled"]
+    response = client.post("/api/login", headers=headers, json={"username": "ci-admin", "password": password})
+    assert response.status_code == 200, "Update must preserve the administrator's password"
+    headers["X-CSRF-Token"] = client.get("/api/session").json()["csrf"]
+    response = client.post("/api/rpc", headers=headers, json={"op": "list-whitelist"})
+    assert response.status_code == 200, response.text
+    assert any(row["network"] in ("198.51.100.253", "198.51.100.253/32") and row["comment"] == "CI"
+               for row in response.json())
+    assert list((Path(os.environ["ProgramData"]) / "RDPGuard").glob("backup-*/guard.db"))
+    print("Update.ps1 preserved login, session, whitelist and backup; protection remains disabled.")
     response = client.post("/api/rpc", headers=headers, json={"op": "activate", "args": {"confirmation": "ENABLE RDP GUARD", "backup_access": True}})
     assert response.status_code == 400, "RDP is not configured on 33345; activation must fail"
 
