@@ -62,6 +62,32 @@ def test_native_logon_audit_api():
     assert isinstance(audit_logon_enabled(), bool)
 
 
+def test_native_named_pipe_client_connects_before_accept():
+    """CreateFile can complete before ConnectNamedPipe has started its overlapped wait."""
+    import uuid
+    import win32con
+    import win32file
+    import win32pipe
+    from rdp_guard.windows import ipc
+    name = r"\\.\pipe\RDPGuard.Test." + uuid.uuid4().hex
+    server = win32pipe.CreateNamedPipe(name,
+        win32pipe.PIPE_ACCESS_DUPLEX | win32con.FILE_FLAG_OVERLAPPED,
+        win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | 0x8,
+        1, 65536, 65536, 5000, None)
+    client = None
+    try:
+        # Deliberately connect before the server accepts: this must not wait for an event.
+        client = win32file.CreateFile(name, 0x12019B, 0, None, win32con.OPEN_EXISTING,
+                                     win32con.FILE_FLAG_OVERLAPPED, None)
+        assert ipc._overlapped(server, lambda ov: win32pipe.ConnectNamedPipe(server, ov), timeout=500) == 0
+        ipc.write_message(client, {"op": "status"}, ipc.MAX_REQUEST)
+        assert ipc.read_message(server, ipc.MAX_REQUEST) == {"op": "status"}
+    finally:
+        if client:
+            client.Close()
+        server.Close()
+
+
 def test_native_named_pipe_identity_and_message_roundtrip(monkeypatch):
     import threading
     import uuid
