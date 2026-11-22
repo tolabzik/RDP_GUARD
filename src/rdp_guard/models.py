@@ -75,6 +75,8 @@ class Settings:
                 raise ValueError(f"{key} must be an integer between {low} and {high}")
         if type(data["include_network_auth"]) is not bool:
             raise ValueError("include_network_auth must be boolean")
+        if data["max_block_entries"] > data["batch_size"] * 20:
+            raise ValueError("max_block_entries/batch_size must fit within 20 batches (40 TCP/UDP rules)")
         bans = data["ban_seconds"]
         if not isinstance(bans, (list, tuple)) or not 1 <= len(bans) <= 10:
             raise ValueError("ban_seconds must contain 1 to 10 durations")

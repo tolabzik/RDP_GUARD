@@ -25,6 +25,13 @@ def test_batch_limit_and_both_protocols():
     assert max(len(r.addresses) for r in rules) == 200
 
 
+def test_small_batches_cannot_create_thousands_of_rules():
+    with pytest.raises(ValueError, match="capacity"):
+        plan_rules([f"198.51.100.{i}" for i in range(1, 22)], 33345, batch_size=1)
+    with pytest.raises(ValueError, match="40 TCP/UDP"):
+        Settings.load({"batch_size": 1})
+
+
 def test_emergency_removes_only_owned_rules(guard):
     activate(guard)
     failures(guard)

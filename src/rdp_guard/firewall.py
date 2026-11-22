@@ -38,7 +38,7 @@ def plan_rules(addresses: list[str], port: int, batch_size: int = 200) -> list[R
     if type(port) is not int or not 1 <= port <= 65535 or not 1 <= batch_size <= 200:
         raise ValueError("Invalid firewall parameters")
     normalized = sorted({network(value, blocking=True) for value in addresses})
-    if len(normalized) > 4000:
+    if len(normalized) > min(4000, batch_size * 20):
         raise ValueError("Firewall entry capacity exceeded")
     result = []
     for index, offset in enumerate(range(0, len(normalized), batch_size)):
