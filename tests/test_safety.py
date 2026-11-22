@@ -71,6 +71,29 @@ def test_activation_requires_admin_whitelist_backup_and_checks(guard):
         guard.dispatch("activate", {"confirmation": "ENABLE RDP GUARD", "backup_access": True}, "test")
 
 
+def test_preflight_reports_session_ip_and_whitelist_without_activating(guard):
+    from rdp_guard.cli import parser
+    assert parser().parse_args(["preflight"]).command == "preflight"
+    before = guard.dispatch("preflight", {}, "test")
+    assert before["sessions"][0]["ip"] == "203.0.113.10"
+    assert before["sessions"][0]["whitelisted"] is False
+    assert not before["checks"]["administrative_whitelist"]
+    guard.dispatch("whitelist-add", {"network": "203.0.113.10"}, "test")
+    after = guard.dispatch("preflight", {}, "test")
+    assert after["sessions"][0]["whitelisted"] is True
+    assert after["checks"]["administrative_whitelist"] and after["ready"]
+    assert guard.mode == "MONITOR ONLY" and not guard.lease_path.exists()
+    assert not guard.firewall.backend.list_rules()
+
+
+def test_preflight_empty_rdp_sessions_cannot_pass_whitelist(guard):
+    guard.dispatch("whitelist-add", {"network": "203.0.113.10"}, "test")
+    guard.safety.admin_sessions = []
+    result = guard.preflight()
+    assert result["sessions"] == []
+    assert not result["checks"]["administrative_whitelist"] and not result["ready"]
+
+
 def test_unconfirmed_activation_rolls_back(guard):
     activate(guard)
     failures(guard)

@@ -62,6 +62,19 @@ def test_native_logon_audit_api():
     assert isinstance(audit_logon_enabled(), bool)
 
 
+def test_native_system_principal_resolution_uses_machine_locale():
+    import win32security
+    from rdp_guard.windows.platform import principal_sid
+    sid = win32security.ConvertStringSidToSid("S-1-5-18")
+    name, domain, _ = win32security.LookupAccountSid(None, sid)
+    assert principal_sid(name) == "S-1-5-18"
+    assert principal_sid(domain + "\\" + name) == "S-1-5-18"
+    assert principal_sid("S-1-5-18") == "S-1-5-18"
+    other = win32security.ConvertStringSidToSid("S-1-5-19")
+    name, domain, _ = win32security.LookupAccountSid(None, other)
+    assert principal_sid(domain + "\\" + name) != "S-1-5-18"
+
+
 def test_native_named_pipe_client_connects_before_accept():
     import subprocess
     from pathlib import Path

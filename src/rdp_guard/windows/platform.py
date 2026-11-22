@@ -162,16 +162,11 @@ class WindowsSafety:
                 scheduler = win32com.client.Dispatch("Schedule.Service")
                 scheduler.Connect()
                 task = scheduler.GetFolder("\\").GetTask("RDPGuardRollback")
-                definition = task.Definition
-                actions = definition.Actions
                 expected = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "RDPGuard" / "rdpguard.exe")
-                result["watchdog"] = (bool(task.Enabled) and actions.Count == 1 and
-                    actions.Item(1).Path.casefold() == expected.casefold() and
-                    actions.Item(1).Arguments.strip() == "watchdog" and
-                    definition.Principal.UserId.upper() in ("SYSTEM", "S-1-5-18", "NT AUTHORITY\\SYSTEM") and
-                    (task.LastTaskResult == 0 or (task.LastTaskResult == 267009 and task.State == 4)) and
-                    (self._watchdog_age() < 150))
-                actions = definition = task = scheduler = None
+                checks = watchdog_checks(task, expected, self._watchdog_age())
+                result["watchdog"] = all(checks.values())
+                result["errors"].extend(f"Watchdog check failed: {name}" for name, ok in checks.items() if not ok)
+                task = scheduler = None
         except Exception as exc:
             result["errors"].append(str(exc))
         return result
@@ -180,6 +175,31 @@ class WindowsSafety:
     def _watchdog_age():
         import time
         return time.time() - (DATA_DIR / "watchdog.alive").stat().st_mtime
+
+
+def principal_sid(user_id):
+    """Resolve the account identity, independent of the localized display name."""
+    import win32security
+    if user_id.upper().startswith("S-1-"):
+        sid = win32security.ConvertStringSidToSid(user_id.upper())
+    else:
+        sid = win32security.LookupAccountName(None, user_id)[0]
+    return win32security.ConvertSidToStringSid(sid)
+
+
+def watchdog_checks(task, expected_executable, heartbeat_age):
+    definition = task.Definition
+    actions = definition.Actions
+    action = actions.Item(1) if actions.Count == 1 else None
+    return {
+        "task_enabled": bool(task.Enabled),
+        "single_action": actions.Count == 1,
+        "expected_executable": action is not None and action.Path.casefold() == expected_executable.casefold(),
+        "watchdog_argument": action is not None and action.Arguments.strip() == "watchdog",
+        "system_account": principal_sid(definition.Principal.UserId) == "S-1-5-18",
+        "successful_run": task.LastTaskResult == 0 or (task.LastTaskResult == 267009 and task.State == 4),
+        "recent_heartbeat": 0 <= heartbeat_age < 150,
+    }
 
 
 def port_in_rule(value, port):

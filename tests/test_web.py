@@ -34,7 +34,7 @@ def login(client):
 def test_anonymous_rds_user_cannot_access_data_or_mutate(web):
     client, _ = web
     assert client.get("/api/session").status_code == 401
-    for operation in ("status", "events", "block", "export-config", "emergency-disable"):
+    for operation in ("status", "preflight", "events", "block", "export-config", "emergency-disable"):
         assert client.post("/api/rpc", headers=ORIGIN, json={"op": operation}).status_code == 401
     assert client.get("/", follow_redirects=False).headers["location"] == "/login"
 

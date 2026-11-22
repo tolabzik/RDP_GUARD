@@ -10,7 +10,7 @@ def parser():
     root = argparse.ArgumentParser(description="RDP Guard local administration (elevated Windows terminal)")
     root.add_argument("--version", action="version", version=f"RDP Guard {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("status", "health", "list-blocks", "list-whitelist", "monitor-only", "emergency-disable",
+    for name in ("status", "health", "preflight", "list-blocks", "list-whitelist", "monitor-only", "emergency-disable",
                  "firewall-reconcile", "export-config", "watchdog", "has-admin"):
         commands.add_parser(name)
     for name in ("block", "unblock", "whitelist-add", "whitelist-remove"):

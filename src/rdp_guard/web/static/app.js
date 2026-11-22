@@ -89,7 +89,15 @@ function graph(histogram, now) {
 async function activate() {
   const pre = await api("preflight");
   const checks = el("div",{},Object.entries(pre.checks).map(([k,v])=>el("div",{class:"status-row"},k,badge(v ? "OK" : "НЕ ПРОЙДЕНО",v ? "good" : "bad"))));
+  const sessions = pre.sessions.length ? table(["Администратор Windows", "IP RDP-сессии", "Белый список"],pre.sessions.map(s=>[
+    `${s.domain ? s.domain+"\\" : ""}${s.username}`,el("span",{class:"mono"},s.ip),
+    badge(s.whitelisted ? "В списке" : "Нет в списке",s.whitelisted ? "good" : "warn")])) :
+    el("p",{class:"muted"},pre.checks.session_inventory ?
+      "Активных административных RDP-сессий не найдено. Для проверки подключитесь по RDP под администратором Windows." :
+      "Не удалось проверить административные RDP-сессии. Подробности — в разделе «Система».");
   modal("Проверка перед включением ACTIVE",[checks,
+    el("h3",{},"Административные RDP-сессии"),sessions,
+    el("p",{class:"muted"},"Windows сообщает эти адреса со слов RDP-клиента. При NAT/VPN они могут отличаться от адреса соединения. Сверьте адрес своей сессии с белым списком; автоматического добавления нет."),
     el("p",{class:"muted"},`Расчёт: ${pre.dry_run.length} решений. После включения нужно повторно подключиться по RDP и подтвердить подключение. Иначе собственные правила будут сняты автоматически.`),
     field("backup_access","Резервный доступ проверен и доступен","checkbox","yes",{required:"required"}),
     field("confirmation","Введите ENABLE RDP GUARD","text","",{required:"required"})],async data=>{

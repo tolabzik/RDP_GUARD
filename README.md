@@ -2,7 +2,7 @@
 
 Локальная защита RDP для Windows Server 2022: Windows Event Log → SQLite → проверяемые правила Windows Defender Firewall. Python 3.12+, две Windows-службы, веб-панель на **http://127.0.0.1:8787**.
 
-**Текущий выпуск: 1.0.0-rc.2, предварительный.** Начальный режим — **MONITOR ONLY**. Приёмка на целевой системе с RDS, Kaspersky Endpoint Security 14.2, SQL Server и 1С обязательна перед production ACTIVE. Репозиторий и CI не подключаются к рабочему серверу.
+**Текущий выпуск: 1.0.0-rc.3, предварительный.** Начальный режим — **MONITOR ONLY**. Приёмка на целевой системе с RDS, Kaspersky Endpoint Security 14.2, SQL Server и 1С обязательна перед production ACTIVE. Репозиторий и CI не подключаются к рабочему серверу.
 
 ![Панель RDP Guard с искусственными событиями проверки](docs/images/dashboard.jpg)
 
@@ -15,6 +15,8 @@
 GitHub Actions проверяет код на Linux и Windows Server 2022, выполняет изолированные проверки настоящих Event Log / Firewall API, собирает PyInstaller-дистрибутив и устанавливает обе службы на одноразовом Windows runner. При успешной проверке тега `v*` публикуется GitHub prerelease. Обычные коммиты `main` также создают скачиваемый build artifact.
 
 В rc.2 исправлено зависание канала управления: в rc.1 службы могли показывать Running, а панель — «Нет связи со службой», CLI — `121 / WaitNamedPipe`. Для существующей установки распакуйте новый ZIP и запустите `Update.ps1` от администратора. Учётная запись панели, настройки и история сохраняются. После обновления проверьте `rdpguard.exe status` и обновите страницу панели.
+
+В rc.3 исправлен ложный отказ проверки watchdog на русской Windows: учётная запись задачи проверяется по SID, поэтому имя `СИСТЕМА` распознаётся корректно. Окно проверки перед ACTIVE и команда `rdpguard.exe preflight` показывают IP административных RDP-сессий и наличие этих адресов в whitelist. Проверка ничего не активирует и не добавляет адреса автоматически.
 
 ## Первый запуск
 
@@ -58,6 +60,7 @@ GitHub Actions проверяет код на Linux и Windows Server 2022, вы
 ```powershell
 rdpguard.exe status
 rdpguard.exe health
+rdpguard.exe preflight
 rdpguard.exe list-blocks
 rdpguard.exe list-whitelist
 rdpguard.exe whitelist-add 203.0.113.10 --comment 'Administrator'

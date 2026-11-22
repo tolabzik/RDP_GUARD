@@ -36,6 +36,23 @@ else:
     raise RuntimeError(status.stderr)
 assert json.loads(status.stdout)["mode"] == "MONITOR ONLY"
 
+# Check the scheduler through the installed SYSTEM guard, not just a direct CLI watchdog call.
+def check_watchdog_preflight():
+    for _ in range(30):
+        result = subprocess.run([cli, "preflight"], capture_output=True, text=True, timeout=20, check=True)
+        preflight = json.loads(result.stdout)
+        if preflight["checks"]["independent_watchdog"]:
+            assert isinstance(preflight["sessions"], list)
+            assert all("whitelisted" in session for session in preflight["sessions"])
+            return
+        time.sleep(1)
+    health = subprocess.run([cli, "health"], capture_output=True, text=True, timeout=20)
+    raise AssertionError("Installed scheduler watchdog check failed: " + health.stdout + health.stderr)
+
+
+check_watchdog_preflight()
+print("Installed scheduled watchdog and read-only CLI preflight passed.")
+
 # A normal local user must not be able to bypass the web boundary through the pipe or database.
 username = "rdpg-ci-" + secrets.token_hex(3)
 user_password = secrets.token_urlsafe(32) + "aA1!"
@@ -142,6 +159,7 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
                for row in response.json())
     assert list((Path(os.environ["ProgramData"]) / "RDPGuard").glob("backup-*/guard.db"))
     print("Update.ps1 preserved login, session, whitelist and backup; protection remains disabled.")
+    check_watchdog_preflight()
     response = client.post("/api/rpc", headers=headers, json={"op": "activate", "args": {"confirmation": "ENABLE RDP GUARD", "backup_access": True}})
     assert response.status_code == 400, "RDP is not configured on 33345; activation must fail"
 

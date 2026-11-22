@@ -248,7 +248,8 @@ class Guard:
             sessions, session_ok = [], False
         white = self.store.rows("SELECT * FROM whitelist")
         blocks = self.store.rows("SELECT * FROM blocks WHERE ended IS NULL")
-        admin_white = any(self.trusted(s["ip"]) for s in sessions)
+        sessions = [s | {"whitelisted": self.trusted(s["ip"])} for s in sessions]
+        admin_white = any(s["whitelisted"] for s in sessions)
         collisions = any(overlaps(b["network"], w["network"]) for b in blocks for w in white)
         rules = self.firewall.backend.list_rules()
         from .firewall import GROUP, PREFIX
