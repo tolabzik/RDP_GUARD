@@ -104,9 +104,9 @@ def test_unconfirmed_activation_rolls_back(guard):
     assert guard.emergency_path.exists()
 
 
-def test_confirm_requires_new_real_logon_and_not_1149(guard):
+def test_unbound_context_and_security_records_cannot_confirm(guard):
     activate(guard)
-    with pytest.raises(ValueError, match="not been observed"):
+    with pytest.raises(ValueError, match="Не найдено"):
         guard.dispatch("confirm-active", {}, "test")
     guard.clock.now += 10
     context = event_xml(record=5, timestamp=guard.clock(), ip="203.0.113.10", username="administrator", event_id=1149,
@@ -116,8 +116,9 @@ def test_confirm_requires_new_real_logon_and_not_1149(guard):
     with pytest.raises(ValueError):
         guard.dispatch("confirm-active", {}, "test")
     guard.ingest(event_xml(record=6, timestamp=guard.clock(), ip="203.0.113.10", username="administrator", event_id=4624), SECURITY, "proof")
-    assert guard.dispatch("confirm-active", {}, "test")["confirmed"]
-    assert json.loads(guard.lease_path.read_text())["deadline"] is None
+    with pytest.raises(ValueError):
+        guard.dispatch("confirm-active", {}, "test")
+    assert json.loads(guard.lease_path.read_text())["deadline"] is not None
 
 
 def test_missing_lease_inhibits_protection(guard):

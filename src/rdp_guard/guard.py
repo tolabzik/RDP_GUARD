@@ -296,22 +296,30 @@ class Guard:
         lease = json.loads(self.lease_path.read_text(encoding="utf-8"))
         if not lease.get("deadline") or self.clock() >= lease["deadline"]:
             raise ValueError("Activation confirmation is absent or expired")
-        proof = False
+        proof = None
         for session in self.protected():
             if not self.trusted(session["ip"]):
                 continue
-            rows = self.store.rows(
-                "SELECT username FROM events WHERE channel='Security' AND ip=? AND timestamp>? "
-                "AND ((event_id=4624 AND logon_type=10) OR event_id=4778)",
-                (session["ip"], lease["started"]),
-            )
-            if any(e["username"].casefold() == session["username"].casefold() for e in rows):
-                proof = True
-        if not proof:
-            raise ValueError("A new confirmed administrative RDP logon/reconnection has not been observed")
-        lease.update(deadline=None, confirmed=True, heartbeat=self.clock())
+            # WindowsSafety binds LSM 21/25 to an active RDP administrative token,
+            # session ID, user/domain and the current WTS connection time. Reuse that
+            # verified proof: reconnects may produce 4624/7 without 4624/10 or 4778.
+            # A late event for a connection established before activation is insufficient.
+            if (session.get("ip_source") in ("LSM/21", "LSM/25") and
+                    lease["started"] < session.get("connected_at", 0) <=
+                    session.get("source_timestamp", 0) <= self.clock()):
+                proof = session
+                break
+        now = self.clock()
+        # A native session/event lookup may finish after the rollback deadline.
+        if now >= lease["deadline"]:
+            raise ValueError("Activation confirmation is absent or expired")
+        if proof is None:
+            raise ValueError("Не найдено новое административное RDP-подключение после включения защиты "
+                             "с адреса из белого списка. Закройте окно RDP, подключитесь снова и повторите подтверждение.")
+        lease.update(deadline=None, confirmed=True, heartbeat=now)
         atomic_json(self.lease_path, lease)
-        self.store.audit(actor, "activation-confirmed", {}, self.clock())
+        self.store.audit(actor, "activation-confirmed", {key: proof[key] for key in
+            ("id", "username", "domain", "ip", "ip_source", "source_record_id", "source_timestamp", "connected_at")}, now)
         return {"confirmed": True}
 
     def add_whitelist(self, value, comment, actor):

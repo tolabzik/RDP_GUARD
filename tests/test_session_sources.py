@@ -1,5 +1,6 @@
 import ctypes
 from datetime import datetime, timezone
+import json
 import socket
 import sys
 from types import SimpleNamespace
@@ -130,7 +131,8 @@ def nat_adapter(monkeypatch):
     return safety, state
 
 
-def test_nat_preflight_and_reconnect_use_existing_public_whitelist(guard, nat_adapter):
+@pytest.mark.parametrize("event_id,logon_type", [(21, 10), (25, 7), (25, None)])
+def test_nat_preflight_and_reconnect_use_existing_public_whitelist(guard, nat_adapter, event_id, logon_type):
     safety, state = nat_adapter
     checks = dict(guard.safety.checks)
     safety.health = lambda port: checks | {"errors": []}
@@ -143,10 +145,107 @@ def test_nat_preflight_and_reconnect_use_existing_public_whitelist(guard, nat_ad
     assert result["sessions"][0]["whitelisted"]
     guard.dispatch("activate", {"confirmation": "ENABLE RDP GUARD", "backup_access": True}, "test")
     guard.clock.now += 11
-    state.update(info=clock_info(connected=NOW + 10, current=NOW + 11), xml=source_xml(timestamp=NOW + 11), now=NOW + 11)
-    guard.ingest(event_xml(timestamp=NOW + 11, event_id=4624, ip=PUBLIC_IP, username="administrator"), SECURITY, "nat-reconnect")
-    assert guard.confirm_active("test")["confirmed"]
+    state.update(info=clock_info(connected=NOW + 10, current=NOW + 11),
+                 xml=source_xml(timestamp=NOW + 11, event_id=event_id), now=NOW + 11)
+    if logon_type is not None:
+        guard.ingest(event_xml(timestamp=NOW + 11, event_id=4624, logon_type=logon_type,
+                               ip=PUBLIC_IP, username="administrator"), SECURITY, "nat-reconnect")
+    assert guard.dispatch("confirm-active", {}, "test")["confirmed"]
+    lease = json.loads(guard.lease_path.read_text())
+    assert lease["confirmed"] and lease["deadline"] is None
+    audit = guard.store.rows("SELECT detail FROM audit WHERE action='activation-confirmed'")
+    detail = json.loads(audit[0]["detail"])
+    assert detail["ip_source"] == f"LSM/{event_id}" and detail["source_record_id"] == 234
+    assert detail["id"] == 2 and detail["connected_at"] == NOW + 10
     assert guard.store.rows("SELECT network FROM whitelist") == [{"network": PUBLIC_IP + "/32"}]
+
+
+@pytest.fixture
+def pending_nat_activation(guard, nat_adapter):
+    safety, state = nat_adapter
+    checks = dict(guard.safety.checks)
+    safety.health = lambda port: checks | {"errors": []}
+    guard.safety = safety
+    guard.dispatch("whitelist-add", {"network": PUBLIC_IP}, "test")
+    guard.dispatch("activate", {"confirmation": "ENABLE RDP GUARD", "backup_access": True}, "test")
+    guard.clock.now += 11
+    state.update(info=clock_info(connected=NOW + 10, current=NOW + 11),
+                 xml=source_xml(timestamp=NOW + 11), now=NOW + 11)
+    return state
+
+
+@pytest.mark.parametrize("event_id,logon_type", [(4624, 7), (4624, 10), (4778, 0)])
+def test_auth_event_without_new_wts_connection_cannot_confirm(guard, pending_nat_activation, event_id, logon_type):
+    state = pending_nat_activation
+    # Even an LSM record delivered after activation is insufficient if WTS still
+    # identifies a connection established before activation.
+    state["info"] = clock_info(current=NOW + 11)
+    guard.safety._sources.cache.clear()
+    guard.ingest(event_xml(timestamp=NOW + 11, event_id=event_id, logon_type=logon_type,
+                           ip=PUBLIC_IP, username="administrator"), SECURITY, "unbound-auth")
+    with pytest.raises(ValueError):
+        guard.dispatch("confirm-active", {}, "test")
+    assert not json.loads(guard.lease_path.read_text())["confirmed"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"session_id": 3}, {"user": r"OTHER\administrator"}, {"user": r"SERVER\other"},
+    {"timestamp": NOW - 1}, {"timestamp": NOW + 12}, {"ip": "LOCAL"}, {"event_id": 24},
+])
+def test_unbound_reconnect_event_cannot_confirm(guard, pending_nat_activation, changes):
+    pending_nat_activation["xml"] = source_xml(**({"timestamp": NOW + 11} | changes))
+    with pytest.raises(RuntimeError, match="Cannot verify"):
+        guard.dispatch("confirm-active", {}, "test")
+    assert not json.loads(guard.lease_path.read_text())["confirmed"]
+
+
+def test_reconnect_from_new_unlisted_address_cannot_confirm(guard, pending_nat_activation):
+    pending_nat_activation["xml"] = source_xml(timestamp=NOW + 11, ip="198.51.100.9")
+    with pytest.raises(ValueError):
+        guard.dispatch("confirm-active", {}, "test")
+    assert guard.store.rows("SELECT network FROM whitelist") == [{"network": PUBLIC_IP + "/32"}]
+
+
+@pytest.mark.parametrize("state", [4, 5])
+def test_disconnected_session_cannot_confirm(guard, pending_nat_activation, state):
+    pending_nat_activation["info"]["state"] = state
+    with pytest.raises(RuntimeError, match="Cannot verify"):
+        guard.dispatch("confirm-active", {}, "test")
+
+
+@pytest.mark.parametrize("kind", ["console", "non_admin"])
+def test_only_administrative_rdp_sessions_can_confirm(guard, pending_nat_activation, monkeypatch, kind):
+    if kind == "console":
+        ts = sys.modules["win32ts"]
+        query = ts.WTSQuerySessionInformation
+        monkeypatch.setattr(ts, "WTSQuerySessionInformation",
+                            lambda server, sid, field: 0 if field == 16 else query(server, sid, field))
+    else:
+        security = sys.modules["win32security"]
+        query = security.GetTokenInformation
+        monkeypatch.setattr(security, "GetTokenInformation",
+                            lambda token, field: [] if field == 2 else query(token, field))
+    with pytest.raises(ValueError):
+        guard.dispatch("confirm-active", {}, "test")
+
+
+def test_connection_at_activation_boundary_is_not_new(guard, pending_nat_activation):
+    pending_nat_activation["info"] = clock_info(connected=NOW, current=NOW + 11)
+    with pytest.raises(ValueError):
+        guard.dispatch("confirm-active", {}, "test")
+
+
+def test_confirmation_expiring_during_session_lookup_is_rejected(guard, pending_nat_activation):
+    read_event = guard.safety._sources.read_event
+
+    def slow_read(session_id):
+        guard.clock.now = NOW + 181
+        return read_event(session_id)
+
+    guard.safety._sources.read_event = slow_read
+    with pytest.raises(ValueError, match="expired"):
+        guard.dispatch("confirm-active", {}, "test")
+    assert not json.loads(guard.lease_path.read_text())["confirmed"]
 
 
 def test_private_client_ip_cannot_satisfy_public_source_whitelist(guard, nat_adapter):
