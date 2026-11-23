@@ -37,6 +37,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y nftables iproute2
           sudo "$(command -v python)" scripts/Test-ProxyFirewall-Linux.py --run
+      - name: Package experimental Linux proxy agent
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip wheel --no-deps --wheel-dir dist/proxy-agent .
+          mkdir -p dist/proxy-agent/scripts dist/proxy-agent/deploy dist/proxy-agent/docs
+          cp scripts/Bootstrap-Proxy.py scripts/Install-ProxyAgent.sh dist/proxy-agent/scripts/
+          cp deploy/rdpguard-proxy.service deploy/proxy-agent.example.json deploy/nginx-stream-info.conf.example dist/proxy-agent/deploy/
+          cp docs/PROXY_AGENT.md docs/PROXY_TEST_REPORT.md dist/proxy-agent/docs/
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: RDPGuard-proxy-agent-experimental
+          path: dist/proxy-agent/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -6,6 +6,9 @@ import subprocess
 
 import pytest
 
+from rdp_guard.proxy_firewall import ProxyBan, ProxyFirewallConfig, build_plan
+from test_proxy_firewall import FakeNft
+
 
 PATH = Path(__file__).resolve().parents[1] / "scripts" / "Test-ProxyFirewall-Linux.py"
 spec = importlib.util.spec_from_file_location("proxy_firewall_acceptance", PATH)
@@ -124,3 +127,19 @@ def test_unowned_namespace_cannot_receive_nft_or_network_command():
         lab.ns_command("proxy", "nft", "-f", "-")
     with pytest.raises(acceptance.AcceptanceError):
         lab.ip_command("proxy", "route", "add", "default", "via", "192.0.2.1")
+
+
+def test_whitelist_acceptance_uses_native_sync_result_contract(monkeypatch):
+    monkeypatch.setattr("rdp_guard.proxy_firewall.sys.platform", "linux")
+    config = ProxyFirewallConfig("acceptance-test", acceptance.PUBLIC, acceptance.PUBLIC_PORT,
+                                 whitelist=(acceptance.TRUSTED_CLIENT + "/32",), enforcement_approved=True,
+                                 max_ttl_seconds=30)
+    desired = [ProxyBan(acceptance.CLIENT, 130), ProxyBan(acceptance.TRUSTED_CLIENT, 130)]
+    acceptance.assert_whitelist_plan(build_plan(config, desired, now=100))
+    firewall = acceptance.ScopedNftFirewall(config, runner=FakeNft(config), monotonic=lambda: 100)
+    result = firewall.sync(desired, mode="enforce", now=100)
+    # A verified transaction is rebuilt from the filtered set, not raw input.
+    assert result.plan.whitelisted == ()
+    acceptance.assert_applied_clients(result, {acceptance.CLIENT})
+    with pytest.raises(acceptance.AcceptanceError):
+        acceptance.assert_applied_clients(result, {acceptance.CLIENT, acceptance.TRUSTED_CLIENT})

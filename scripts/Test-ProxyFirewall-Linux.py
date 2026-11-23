@@ -31,7 +31,7 @@ if (source / "rdp_guard" / "proxy_firewall.py").is_file():
     sys.path.insert(0, str(source))
 
 from rdp_guard.proxy_firewall import (  # noqa: E402
-    ProxyBan, ProxyFirewallConfig, ProxyFirewallError, ScopedNftFirewall,
+    ProxyBan, ProxyFirewallConfig, ProxyFirewallError, ScopedNftFirewall, build_plan,
 )
 
 
@@ -249,10 +249,10 @@ def acceptance(lab):
     lab.expect("baseline_tcp_through_dnat", True)
     lab.expect("baseline_udp_through_dnat", True, protocol="udp")
     now = time.time()
-    result = firewall.sync([ProxyBan(CLIENT, now + 30), ProxyBan(TRUSTED_CLIENT, now + 30)],
-                           mode="enforce", now=now)
-    if result.plan.whitelisted != (TRUSTED_CLIENT,):
-        raise AcceptanceError("Trusted client unexpectedly entered desired ban set")
+    desired = [ProxyBan(CLIENT, now + 30), ProxyBan(TRUSTED_CLIENT, now + 30)]
+    assert_whitelist_plan(build_plan(config, desired, now=now))
+    result = firewall.sync(desired, mode="enforce", now=now)
+    assert_applied_clients(result, {CLIENT})
     before = lab.counted_packets("inet", config.table_name)
     nat_before = lab.counted_packets("ip", NAT_TABLE)
     lab.expect("target_tcp_blocked_before_dnat", False)
@@ -307,6 +307,20 @@ def acceptance(lab):
     if table.get("comment") != "acceptance-foreign-owner":
         raise AcceptanceError("Foreign table was modified")
     lab.pass_check("foreign_table_not_modified_or_removed")
+
+
+def assert_whitelist_plan(plan):
+    if plan.whitelisted != (TRUSTED_CLIENT,) or TRUSTED_CLIENT in {ban.client_ip for ban in plan.bans}:
+        raise AcceptanceError("Trusted client unexpectedly entered desired ban set")
+
+
+def assert_applied_clients(result, expected):
+    # sync rebuilds its transaction from already-filtered clients after native
+    # checks. Excluded-input diagnostics belong to the original pure plan; the
+    # final result describes only the clients verified in the actual firewall.
+    if (not result.applied or result.plan is None
+            or {ban.client_ip for ban in result.plan.bans} != expected):
+        raise AcceptanceError("Verified firewall clients differ from the expected ban set")
 
 
 def main(argv=None):
