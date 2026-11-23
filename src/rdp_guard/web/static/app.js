@@ -170,6 +170,35 @@ async function whitelistView() {
       button("Удалить",()=>confirmAction("Удалить доверенный адрес",r.network,()=>api("whitelist-remove",{network:r.network}))))])),[
         button("Импорт",()=>listImport("whitelist")),button("Экспорт",()=>download("rdpguard-whitelist.json",rows)),button("+ Доверенный адрес",()=>addNetwork("whitelist"),"primary")])];
 }
+function proxyPairFile() {
+  const picker=el("input",{type:"file",accept:".rdpg,application/json"});
+  picker.onchange=async()=>{
+    try {
+      const file=picker.files[0];if(!file)return;
+      if(file.size>65536)throw new Error("Файл подключения слишком большой (максимум 64 КиБ)");
+      let document;try{document=JSON.parse(await file.text());}catch(_){throw new Error("Не удалось прочитать файл .rdpg");}
+      const preview=await api("proxy-pair-preview",{document});
+      const relays=preview.relay_ips || [],select=el("select",{name:"trusted_relay",required:"required"},
+        ...(relays.length>1 ? [el("option",{value:""},"Выберите адрес прокси")] : []),
+        ...relays.map(ip=>el("option",{value:ip},ip)));
+      modal("Подключить прокси файлом",[
+        el("p",{},`Linux: ${preview.agent_url}`),el("p",{},`Этот Windows-сервер: ${preview.computer}`),
+        el("p",{},`RDP: ${preview.listener_ip}:${preview.listener_port} → ${preview.backend_ip}:${preview.backend_port} (TCP)`),
+        el("p",{class:"muted"},`Доверенные клиентские сети на Linux: ${(preview.whitelist || []).join(", ") || "не заданы"}. Этот список не переносится в Windows.`),
+        el("label",{},"Доверенный адрес прокси, который Windows видит при подключении",select),
+        field("trust_relay","Доверяю выбранному IP прокси: добавить только этот адрес в белый список Windows для административного RDP-доступа.","checkbox","yes",{required:"required"}),
+        el("p",{class:"muted"},"Ключ этого сервера будет создан локально. Подключение начнётся в наблюдении. Автоматические блокировки включаются отдельно после проверки."),
+        el("p",{class:"muted"},`Файл действует до ${fmt(preview.expires_at)}.`)
+      ],async data=>{
+        if(data.get("trust_relay")!=="yes")throw new Error("Подтвердите доверие адресу прокси");
+        await api("proxy-pair",{document,trusted_relay:data.get("trusted_relay")});
+        document=null;
+      });
+    } catch(error) {notice(error);}
+    finally {picker.remove();}
+  };
+  picker.style.display="none";document.body.append(picker);picker.click();
+}
 function proxyConfigure(binding) {
   modal("Подключить агент прокси", [
     el("p",{class:"muted"},"Сначала установите агент на Linux и скопируйте сертификаты в защищённую папку RDPGuard\\proxy. Подключение начнётся в режиме наблюдения."),
@@ -190,7 +219,13 @@ function proxyConfigure(binding) {
 async function proxyView() {
   const p=await api("proxy-status"),b=p.binding,s=p.status,health=b.enabled && !p.stale && s.healthy;
   const labels={observed:"Наблюдается",proposed:"Порог достигнут",pending:"Применяется",blocked:"Заблокирован",whitelisted:"Доверенный",removed:"Снят",removal_pending:"Снимается",suspended:"Приостановлен",expired:"Истёк"};
-  const actions=[button("Настроить",()=>proxyConfigure(b))];
+  const enrollment=p.enrollment || {},pending=["preparing","connecting","retrying","verifying","completing"].includes(enrollment.state);
+  const actions=[button("Подключить файлом",proxyPairFile,"primary"),button("Ручная настройка",()=>proxyConfigure(b))];
+  actions[0].disabled=pending;
+  const phases={preparing:"Создаётся локальный ключ",connecting:"Проверяется Linux и выпускается сертификат",retrying:"Linux пока недоступен — повторяем подключение",verifying:"Проверяется сертификат сервера Windows",completing:"Подключение сохранено; завершается настройка Linux",paired:"Подключение сохранено. Ожидаем свежие события и сопоставления.",failed:"Подключение не сохранено",cancelled:"Подключение отменено"};
+  const connected=!!b.enabled && !p.stale && s.transport_healthy===true;
+  const collecting=connected && s.capture_healthy===true && !!s.last_sent_utc;
+  const matched=collecting && s.matched>0;
   if(b.enabled) {
     actions.push(button("Наблюдение",()=>api("proxy-configure",{binding:{...b,mode:"monitor"}})));
     actions.push(button("Отключить обмен",()=>confirmAction("Отключить агент", "Новые события перестанут передаваться. Адреса самого прокси сохранят исключение из локальных блокировок.",()=>api("proxy-configure",{binding:{enabled:false}}))));
@@ -201,7 +236,12 @@ async function proxyView() {
   }
   return [panel("Агент прокси · экспериментальная ветка",el("div",{},
     el("p",{},badge(!b.enabled ? "Не подключён" : health ? "Связь и сбор работают" : "Нет свежего подтверждения",health ? "good" : "warn")),
-    el("p",{},b.enabled ? `${b.agent_url} · ${b.stream_id} → ${b.computer}` : "Подключите Linux-агент к этому Windows-серверу."),
+    el("p",{},b.enabled ? `${b.agent_url} · ${b.stream_id} → ${b.computer}` : "Сохраните файл .rdpg из мастера Linux и выберите «Подключить файлом»."),
+    phases[enrollment.state] ? el("p",{},phases[enrollment.state]) : null,
+    enrollment.error ? el("p",{class:"muted"},enrollment.error) : null,
+    el("div",{},badge(connected ? "Linux: связь подтверждена" : "Linux: ожидаем связь",connected ? "good" : "warn")," ",
+      badge(collecting ? "Обмен событиями подтверждён" : "События: ожидаем проверку",collecting ? "good" : "warn")," ",
+      badge(matched ? "Реальные IP сопоставлены" : "Реальные IP: совпадений пока нет",matched ? "good" : "warn")),
     el("p",{},`Режим: ${b.mode==="enforce" ? "Блокировки запрошены" : "Наблюдение"}. Совпадений: ${number(s.matched)}. Не сопоставлено: ${number(s.unresolved)}. Достигли порога: ${number(s.proposed)}. Применено блокировок: ${number(s.active_bans)}.`),
     el("p",{class:"muted"},s.enforcement_allowed ? "Агент разрешает блокировки после локальной проверки." : "Автоблокировки закрыты до проверки на изолированном стенде. Здесь видны результаты наблюдения."),
     el("p",{class:"muted"},`Адреса общей инфраструктуры: ${(p.relay_ips || []).join(", ") || "не заданы"}`),

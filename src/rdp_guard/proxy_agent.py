@@ -19,6 +19,7 @@ import signal
 import socket
 import sqlite3
 import ssl
+import sys
 import threading
 import time
 import uuid
@@ -540,7 +541,12 @@ def make_server(agent):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"setup", "status", "doctor", "unconfigure"}:
+        from .proxy_setup import main as setup_main
+        return setup_main(argv)
+    parser = argparse.ArgumentParser(description=__doc__,
+        epilog="Setup commands: rdpguard-proxy setup | status | doctor | unconfigure")
     parser.add_argument("--config", required=True)
     parser.add_argument("--check-config", action="store_true")
     args = parser.parse_args(argv)

@@ -57,6 +57,43 @@ jobs:
           name: test-results-${{ runner.os }}
           path: test-results/
 
+  linux-deb:
+    timeout-minutes: 20
+    needs: tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e ".[test]"
+      - name: Build Ubuntu 24.04 amd64 package with bundled application dependencies
+        run: |
+          python -m pip wheel --no-deps --wheel-dir dist .
+          python scripts/Build-ProxyDeb.py --wheel dist/rdp_guard-1.1.0.dev1-py3-none-any.whl --output-dir dist/deb
+      - name: Test unattended install, upgrade and removal on disposable Ubuntu
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3.12 nftables iproute2 openssl ca-certificates
+          sudo "$(command -v python)" scripts/Test-ProxyDeb-Linux.py --run --deb dist/deb/rdpguard-proxy_1.1.0~dev1_amd64.deb
+      - name: Check setup discovery and reversible logging with disposable NPM
+        run: |
+          docker pull jc21/nginx-proxy-manager:2.17.1
+          sudo "$(command -v python)" scripts/Test-ProxySetup-Npm.py --run --image jc21/nginx-proxy-manager:2.17.1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proxy-setup-test-results
+          path: test-results/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDPGuard-proxy-deb-ubuntu24-amd64
+          path: |
+            dist/deb/*.deb
+            dist/deb/*.sha256
+          if-no-files-found: error
+
   windows-package:
     timeout-minutes: 20
     needs: tests
@@ -72,7 +109,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $Version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.1.0-dev.0' }
+          $Version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.1.0-dev.1' }
           if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw 'Invalid release tag.' }
           "version=$Version" >> $env:GITHUB_OUTPUT
       - name: Build Windows x64 distribution

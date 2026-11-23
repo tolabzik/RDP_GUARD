@@ -396,10 +396,52 @@ class Guard:
                 "emergency_disabled": self.emergency_path.exists(),
                 "lease": json.loads(self.lease_path.read_text(encoding="utf-8")) if self.lease_path.exists() else None}
 
+    def _commit_proxy_binding(self, binding, actor, *, trusted_relay=None):
+        """Caller holds Guard.lock; credentials have already been validated."""
+        relays = sorted(set(self.relay_ips()) | set(binding.get("relay_ips", [])))
+        if trusted_relay is not None:
+            if trusted_relay not in binding.get("relay_ips", []):
+                raise ValueError("Trusted relay is not declared in this binding")
+            if any(contains(row["network"], trusted_relay) for row in self.store.rows(
+                    "SELECT network FROM blocks WHERE ended IS NULL")):
+                raise ValueError("Trusted relay overlaps an existing block")
+        with self.store.transaction() as db:
+            self.store.set("proxy_binding", binding)
+            self.store.set("proxy_relay_ips", relays)
+            self.store.set("proxy_status", {})
+            self.store.set("proxy_outbox", None)
+            if trusted_relay is not None:
+                db.execute("INSERT OR IGNORE INTO whitelist VALUES (?,?,?,?)",
+                           (network(trusted_relay), "Trusted proxy relay (pairing)", actor, self.clock()))
+            for row in self.store.rows("SELECT id,network FROM blocks WHERE ended IS NULL"):
+                if any(contains(row["network"], relay) for relay in relays):
+                    db.execute("UPDATE blocks SET ended=?,status='proxy-relay' WHERE id=?",
+                               (self.clock(), row["id"]))
+            self.store.audit(actor, "proxy-pair" if trusted_relay is not None else "proxy-configure",
+                             {"enabled": binding["enabled"], "mode": binding.get("mode", "monitor"),
+                              "relay_ips": relays, "trusted_relay": trusted_relay}, self.clock())
+        # The normal runtime tick reconciles local rules. Pairing itself performs
+        # no firewall operation and never changes the protection/activation mode.
+        return {"ok": True, "relay_ips": relays}
+
+    def _enrollment(self):
+        if getattr(self, "stopping", False):
+            raise ValueError("Enrollment service is stopping")
+        if not hasattr(self, "proxy_enrollment"):
+            from .proxy_enrollment import EnrollmentManager
+            self.proxy_enrollment = EnrollmentManager(self)
+        return self.proxy_enrollment
+
     def dispatch(self, operation, args, actor):
         if not isinstance(args, dict):
             raise ValueError("Arguments must be an object")
         with self.lock:
+            if operation == "proxy-pair-preview":
+                return self._enrollment().preview(args.get("document"))
+            if operation == "proxy-pair-status":
+                return self._enrollment().status()
+            if operation == "proxy-pair":
+                return self._enrollment().start(args.get("document"), args.get("trusted_relay"), actor)
             if operation == "proxy-status":
                 status = dict(self.store.get("proxy_status", {}))
                 from .proxy_evidence import instant
@@ -411,7 +453,8 @@ class Guard:
                 except (ValueError, KeyError, TypeError):
                     stale = True
                 return {"binding": binding,
-                        "relay_ips": self.relay_ips(), "status": status, "stale": stale}
+                        "relay_ips": self.relay_ips(), "status": status, "stale": stale,
+                        "enrollment": self.proxy_enrollment.status() if hasattr(self, "proxy_enrollment") else {"state": "idle"}}
             if operation == "proxy-configure":
                 from .proxy_client import binding_id, validate_binding
                 binding = validate_binding(self.data_dir, args.get("binding"))
@@ -432,20 +475,11 @@ class Guard:
                             or not fresh or status.get("error") or any(status.get(field) is not True for field in
                                                 ("enforcement_allowed", "transport_healthy", "healthy", "capture_healthy"))):
                         raise ValueError("Fresh validated status for the unchanged proxy binding is required")
-                relays = sorted(set(self.relay_ips()) | set(binding.get("relay_ips", [])))
-                with self.store.transaction() as db:
-                    self.store.set("proxy_binding", binding)
-                    self.store.set("proxy_relay_ips", relays)
-                    self.store.set("proxy_status", {})
-                    self.store.set("proxy_outbox", None)
-                    for row in self.store.rows("SELECT id,network FROM blocks WHERE ended IS NULL"):
-                        if any(contains(row["network"], relay) for relay in relays):
-                            db.execute("UPDATE blocks SET ended=?,status='proxy-relay' WHERE id=?",
-                                       (self.clock(), row["id"]))
-                    self.store.audit(actor, operation, {"enabled": binding["enabled"],
-                                     "mode": binding.get("mode", "monitor"), "relay_ips": relays}, self.clock())
+                if hasattr(self, "proxy_enrollment"):
+                    self.proxy_enrollment.cancel()
+                result = self._commit_proxy_binding(binding, actor)
                 self.tick(force=True)
-                return {"ok": True, "relay_ips": relays}
+                return result
             if operation == "proxy-unblock":
                 if not self.store.get("proxy_binding", {}).get("enabled"):
                     raise ValueError("Proxy agent is not configured")

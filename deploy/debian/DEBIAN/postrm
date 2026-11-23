@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    remove|purge|abort-install|disappear)
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
+esac
+if [ "$1" = purge ]; then
+    echo 'Customer configuration, certificates, state and nginx logs were preserved. Remove them only after reviewing their ownership.'
+fi

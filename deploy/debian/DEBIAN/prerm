@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    upgrade)
+        install -d -m 0700 /run/rdpguard-proxy-package
+        if systemctl is-active --quiet rdpguard-proxy.service; then
+            : > /run/rdpguard-proxy-package/was-running
+            chmod 0600 /run/rdpguard-proxy-package/was-running
+            systemctl stop rdpguard-proxy.service
+        else
+            rm -f /run/rdpguard-proxy-package/was-running
+        fi
+        ;;
+    remove)
+        if [ -f /var/lib/rdpguard-proxy/setup-state.json ]; then
+            if ! /usr/bin/python3.12 -c 'import json; from pathlib import Path; p=Path("/var/lib/rdpguard-proxy/setup-state.json"); raise SystemExit(1 if json.loads(p.read_text()).get("logging_active") else 0)'; then
+                echo 'Managed NPM INFO logging is active. Run sudo rdpguard-proxy unconfigure before removing the package.' >&2
+                exit 1
+            fi
+        fi
+        systemctl stop rdpguard-proxy.service rdpguard-proxy-logrotate.timer 2>/dev/null || true
+        systemctl disable rdpguard-proxy.service rdpguard-proxy-logrotate.timer 2>/dev/null || true
+        rm -f /run/rdpguard-proxy-package/was-running
+        ;;
+esac

@@ -1,0 +1,5 @@
+#!/usr/bin/python3.12 -I
+import sys
+sys.path.insert(0, '/usr/lib/rdpguard-proxy')
+from rdp_guard.proxy_agent import main
+raise SystemExit(main())

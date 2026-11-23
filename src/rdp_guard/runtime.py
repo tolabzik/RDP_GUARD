@@ -47,11 +47,16 @@ def run_guard(stop: threading.Event):
             stop.wait(1)
     finally:
         stop.set()
+        with guard.lock:
+            guard.stopping = True
         for collector in collectors:
             if collector.is_alive():
                 collector.join(10)
         if proxy_worker.is_alive():
             proxy_worker.join(15)
+        enrollment = getattr(guard, "proxy_enrollment", None)
+        if enrollment is not None:
+            enrollment.close()
         server.join(15)
         store.close()
 
