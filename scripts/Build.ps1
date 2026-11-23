@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-[CmdletBinding()] param([string]$Version = '1.1.0-dev.1')
+[CmdletBinding()] param([string]$Version = '1.1.0-rc.1')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw 'Invalid package version.' }
 Push-Location (Split-Path $PSScriptRoot -Parent)
