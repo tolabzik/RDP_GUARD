@@ -7,7 +7,7 @@ from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError
 
 READ_OPERATIONS = {"status", "health", "preflight", "events", "list-blocks", "list-whitelist", "audit",
-                   "settings", "export-config", "diagnostics"}
+                   "settings", "export-config", "diagnostics", "proxy-status", "proxy-pair-preview", "proxy-pair-status"}
 
 
 class AuthenticationError(ValueError):

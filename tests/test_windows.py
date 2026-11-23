@@ -31,6 +31,57 @@ def test_native_event_subscription_and_bookmark(channel):
         signal.Close()
 
 
+def test_native_proxy_export_is_read_only_and_handles_absent_history():
+    import json
+    import time
+    from rdp_guard.proxy_evidence import CHANNEL, WINDOWS_SCHEMA, instant
+    from rdp_guard.windows.proxy_export import NativeProxyExporter, utc
+
+    exporter = NativeProxyExporter()
+    snapshot = exporter._snapshot()
+    # These assertions expose missing APIs, wrong property constants/signatures,
+    # or an incorrect (value, EVT variant type) unpacking even on an empty log.
+    assert snapshot["channel"] == CHANNEL
+    assert type(snapshot["is_enabled"]) is bool, snapshot
+    assert snapshot["log_mode"] in {"Circular", "Retain", "AutoBackup"}, snapshot
+    for name in ("maximum_size_bytes", "record_count", "oldest_record_number"):
+        assert type(snapshot[name]) is int and snapshot[name] >= 0, snapshot
+    assert snapshot["maximum_size_bytes"] > 0
+    assert "Native channel metadata could not be read" not in snapshot["errors"]
+    # Exercise the forward-direction boundary query without the snapshot's
+    # deliberately tolerant empty-history error handling.
+    assert len(exporter._query("*", 1, oldest=True)) <= 1
+
+    # A bounded query is valid even if no RDP authentication happened in CI.
+    end = time.time() - 2
+    query = ("*[System[(EventID=131 or EventID=140) and TimeCreated["
+             f"@SystemTime >= '{utc(end - 30)}' and @SystemTime < '{utc(end)}']]]")
+    records = exporter._query(query, 2)
+    assert isinstance(records, list) and len(records) <= 2
+    assert all(isinstance(raw, str) and "<Event" in raw for raw in records)
+
+    document = exporter.export(utc(end - 30), utc(end), lookback_seconds=5, max_events=16)
+    assert document["schema"] == WINDOWS_SCHEMA
+    assert document["window_end_exclusive"] is True
+    assert document["max_events"] == 16 and document["lookback_seconds"] == 5
+    assert 0 <= document["queried_event_count"] <= 17
+    assert document["event_count"] == len(document["events"]) <= 16
+    assert document["errors"] == (["Native event query exceeded max_events"] if document["truncated"] else [])
+    assert document["complete"] is (not document["truncated"])
+    assert instant(document["query_start_utc"]) < instant(document["requested_start_utc"]) < instant(document["requested_end_utc"])
+    json.dumps(document, allow_nan=False)
+    coverage = document["log_coverage"]
+    assert coverage["status"] in {"retained", "insufficient", "unknown"}
+    for boundary_snapshot in (coverage["before"], coverage["after"]):
+        assert type(boundary_snapshot["is_enabled"]) is bool
+        assert type(boundary_snapshot["record_count"]) is int
+        assert "Native channel metadata could not be read" not in boundary_snapshot["errors"]
+        if boundary_snapshot["oldest"] is None or boundary_snapshot["newest"] is None:
+            assert coverage["status"] != "retained"
+        if boundary_snapshot["is_enabled"] is False:
+            assert coverage["status"] != "retained"
+
+
 def test_native_firewall_roundtrip_and_empty_cleanup():
     from rdp_guard.firewall import FirewallEngine, owned
     from rdp_guard.windows.firewall import WindowsFirewall

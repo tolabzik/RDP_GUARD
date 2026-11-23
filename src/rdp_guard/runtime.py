@@ -8,6 +8,7 @@ import time
 from .auth import Dispatcher
 from .firewall import FirewallEngine
 from .guard import Guard
+from .proxy_client import ProxyWorker
 from .storage import Store
 
 
@@ -29,6 +30,7 @@ def run_guard(stop: threading.Event):
     dispatcher = Dispatcher(guard)
     server = PipeServer(dispatcher, stop)
     collectors = [Collector(guard, channel, stop) for channel in QUERIES]
+    proxy_worker = ProxyWorker(guard, stop)
     try:
         server.start()
         server.ready.wait(15)
@@ -36,6 +38,7 @@ def run_guard(stop: threading.Event):
             raise RuntimeError(server.error or "IPC server did not start")
         for collector in collectors:
             collector.start()
+        proxy_worker.start()
         while not stop.is_set():
             try:
                 guard.tick()
@@ -44,9 +47,16 @@ def run_guard(stop: threading.Event):
             stop.wait(1)
     finally:
         stop.set()
+        with guard.lock:
+            guard.stopping = True
         for collector in collectors:
             if collector.is_alive():
                 collector.join(10)
+        if proxy_worker.is_alive():
+            proxy_worker.join(15)
+        enrollment = getattr(guard, "proxy_enrollment", None)
+        if enrollment is not None:
+            enrollment.close()
         server.join(15)
         store.close()
 

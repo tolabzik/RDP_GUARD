@@ -1,0 +1,11 @@
+[Unit]
+Description=Rotate only the RDP Guard nginx evidence log
+ConditionPathExists=/etc/rdpguard-proxy/logrotate.conf
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/sbin/logrotate --state /var/lib/rdpguard-proxy/logrotate.status /etc/rdpguard-proxy/logrotate.conf
+NoNewPrivileges=true
+PrivateTmp=true

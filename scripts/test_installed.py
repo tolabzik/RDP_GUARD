@@ -4,7 +4,10 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import subprocess
+import tempfile
+import threading
 import time
 
 import httpx
@@ -70,6 +73,80 @@ def check_watchdog_preflight():
 
 check_watchdog_preflight()
 print("Installed scheduled watchdog and read-only CLI preflight passed.")
+
+
+def check_installed_pairing(client, headers):
+    """Exercise crypto and key storage inside the actual frozen SYSTEM service."""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from rdp_guard.proxy_pairing import create_pairing, PairingAuthority, make_pairing_server
+    import ipaddress
+
+    addresses = [row.address for rows in psutil.net_if_addrs().values() for row in rows
+                 if row.family == socket.AF_INET and not ipaddress.ip_address(row.address).is_loopback
+                 and not ipaddress.ip_address(row.address).is_link_local
+                 and not ipaddress.ip_address(row.address).is_unspecified]
+    assert addresses, "Disposable runner needs one local IPv4 address for certificate enrollment"
+    host = addresses[0]
+    with socket.socket() as reservation:
+        reservation.bind((host, 0))
+        port = reservation.getsockname()[1]
+    issued = []
+    with tempfile.TemporaryDirectory(prefix="rdpguard-installed-pair-") as directory:
+        key_directory = Path(directory) / "authority"
+        document = create_pairing(key_directory, {
+            "agent_url": f"https://{host}:{port}", "stream_id": "installed-ci",
+            "backend_id": "windows-ci", "listener_ip": "192.0.2.45", "listener_port": 45451,
+            "backend_ip": "192.0.2.46", "backend_port": 45451, "relay_ips": ["203.0.113.249"],
+            "whitelist": ["198.51.100.253/32"], "protocols": ["tcp"],
+        })
+        authority = PairingAuthority(document, key_directory, issued.append)
+        server = make_pairing_server(authority, host, port)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            response = client.post("/api/rpc", headers=headers,
+                                   json={"op": "proxy-pair-preview", "args": {"document": document}})
+            assert response.status_code == 200, response.text
+            computer = response.json()["computer"]
+            request = {"op": "proxy-pair", "args": {"document": document, "trusted_relay": "203.0.113.249"}}
+            rejected = client.post("/api/rpc", headers={"Origin": headers["Origin"]}, json=request)
+            assert rejected.status_code == 401, "Enrollment mutation must require CSRF"
+            response = client.post("/api/rpc", headers=headers, json=request)
+            assert response.status_code == 200, response.text
+            until = time.monotonic() + 40
+            while time.monotonic() < until:
+                response = client.post("/api/rpc", headers=headers, json={"op": "proxy-pair-status"})
+                assert response.status_code == 200, response.text
+                state = response.json()
+                if state["state"] in ("paired", "failed", "cancelled"):
+                    break
+                time.sleep(0.2)
+            assert state["state"] == "paired", state
+            assert len(issued) == 1 and issued[0]["computer"] == computer
+            assert authority.acknowledged and not state.get("handoff_pending"), state
+            response = client.post("/api/rpc", headers=headers, json={"op": "proxy-status"})
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result["binding"]["mode"] == "monitor" and result["binding"]["enabled"]
+            assert "203.0.113.249" in result["relay_ips"]
+            key_root = Path(os.environ["ProgramData"]) / "RDPGuard" / "proxy" / ("enrollment-" + document["pairing_id"])
+            cert = x509.load_pem_x509_certificate((key_root / "client.pem").read_bytes())
+            assert cert.fingerprint(hashes.SHA256()).hex() == issued[0]["client_sha256"]
+            assert (key_root / "client.key").is_file()
+            for path in key_root.iterdir():
+                assert document["token"].encode() not in path.read_bytes(), "Pairing token must not persist"
+            response = client.post("/api/rpc", headers=headers, json={"op": "list-whitelist"})
+            assert any(row["network"] == "203.0.113.249/32" for row in response.json())
+            print("Frozen SYSTEM service imported pairing, enrolled over pinned TLS, saved a local key and monitor binding.")
+        finally:
+            response = client.post("/api/rpc", headers=headers,
+                                   json={"op": "proxy-configure", "args": {"binding": {"enabled": False}}})
+            assert response.status_code == 200, response.text
+            server.shutdown()
+            server.server_close()
+            thread.join(10)
+            authority.close()
 
 # Read the actual registered definition and observe a timer-driven execution,
 # not only the one immediate invocation performed by the installer.
@@ -183,6 +260,7 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
     status = subprocess.run([cli, "status"], capture_output=True, text=True, timeout=20, check=True)
     assert json.loads(status.stdout)["mode"] == "MONITOR ONLY"
     print("100 concurrent dashboard RPC requests and subsequent CLI status passed.")
+    check_installed_pairing(client, headers)
     # State left by the Server 2012 R2 installation failure, after the user creates
     # the panel account: provisioned services and data, stopped services, missing task.
     subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",

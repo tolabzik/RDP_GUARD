@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+case "$1" in
+    configure|abort-upgrade)
+        systemctl daemon-reload 2>/dev/null || true
+        if [ -f /run/rdpguard-proxy-package/was-running ]; then
+            if [ ! -f /etc/rdpguard-proxy/config.json ]; then
+                echo 'Previous running service has no configuration; refusing restart.' >&2
+                exit 1
+            fi
+            systemctl start rdpguard-proxy.service
+            rm -f /run/rdpguard-proxy-package/was-running
+        fi
+        ;;
+esac
+# New installs are deliberately neither started nor enabled.

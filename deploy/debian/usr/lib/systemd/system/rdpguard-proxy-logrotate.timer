@@ -1,0 +1,12 @@
+[Unit]
+Description=Bound RDP Guard nginx evidence log retention
+ConditionPathExists=/etc/rdpguard-proxy/logrotate.conf
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=rdpguard-proxy-logrotate.service
+
+[Install]
+WantedBy=timers.target

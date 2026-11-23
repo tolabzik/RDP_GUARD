@@ -1,4 +1,4 @@
-name: Test and build Windows release
+name: Test and build RDP Guard release
 on:
   push:
     branches: [main]
@@ -31,11 +31,68 @@ jobs:
       - run: python -m pytest -q --junitxml=test-results/pytest.xml
         env:
           RDP_GUARD_NATIVE_TESTS: ${{ runner.os == 'Windows' && '1' || '0' }}
+      - name: Verify isolated Linux pre-DNAT firewall scope and expiry
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nftables iproute2
+          sudo "$(command -v python)" scripts/Test-ProxyFirewall-Linux.py --run
+      - name: Package experimental Linux proxy agent
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip wheel --no-deps --wheel-dir dist/proxy-agent .
+          mkdir -p dist/proxy-agent/scripts dist/proxy-agent/deploy dist/proxy-agent/docs
+          cp scripts/Bootstrap-Proxy.py scripts/Install-ProxyAgent.sh dist/proxy-agent/scripts/
+          cp deploy/rdpguard-proxy.service deploy/proxy-agent.example.json deploy/nginx-stream-info.conf.example dist/proxy-agent/deploy/
+          cp docs/PROXY_AGENT.md docs/PROXY_TEST_REPORT.md dist/proxy-agent/docs/
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: RDPGuard-proxy-agent-experimental
+          path: dist/proxy-agent/
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-results-${{ runner.os }}
           path: test-results/
+
+  linux-deb:
+    timeout-minutes: 20
+    needs: tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e ".[test]"
+      - name: Build Ubuntu 24.04 amd64 package with bundled application dependencies
+        run: |
+          python -m pip wheel --no-deps --wheel-dir dist .
+          python scripts/Build-ProxyDeb.py --wheel dist/rdp_guard-1.1.0rc1-py3-none-any.whl --output-dir dist/deb
+      - name: Test unattended install, upgrade and removal on disposable Ubuntu
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3.12 nftables iproute2 openssl ca-certificates
+          sudo "$(command -v python)" scripts/Test-ProxyDeb-Linux.py --run --deb dist/deb/rdpguard-proxy_1.1.0~rc1_amd64.deb
+      - name: Check setup discovery and reversible logging with disposable NPM
+        run: |
+          docker pull jc21/nginx-proxy-manager:2.17.1
+          sudo "$(command -v python)" scripts/Test-ProxySetup-Npm.py --run --image jc21/nginx-proxy-manager:2.17.1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: proxy-setup-test-results
+          path: test-results/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDPGuard-proxy-deb-ubuntu24-amd64
+          path: |
+            dist/deb/*.deb
+            dist/deb/*.sha256
+          if-no-files-found: error
 
   windows-package:
     timeout-minutes: 20
@@ -52,7 +109,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $Version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.0.0-rc.8' }
+          $Version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.1.0-rc.1' }
           if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw 'Invalid release tag.' }
           "version=$Version" >> $env:GITHUB_OUTPUT
       - name: Build Windows x64 distribution
@@ -83,19 +140,34 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: windows-package
+    needs: [windows-package, linux-deb]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require release commit on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - uses: actions/download-artifact@v4
         with:
           name: RDPGuard-windows-x64
           path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: RDPGuard-proxy-deb-ubuntu24-amd64
+          path: release
+      - name: Prepare one-command installer and instructions
+        run: |
+          cp scripts/Install-ProxyRelease.sh release/
+          cp docs/PROXY_SETUP.md release/INSTALL.md
+          cd release
+          sha256sum Install-ProxyRelease.sh > Install-ProxyRelease.sh.sha256
+          sha256sum --check *.sha256
       - name: Publish tested binaries and checksums
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" release/* --title "RDP Guard $RELEASE_TAG" --prerelease --notes-file docs/RELEASE_NOTES.md
+          gh release create "$RELEASE_TAG" release/* --verify-tag --title "RDP Guard $RELEASE_TAG" --prerelease --notes-file docs/RELEASE_NOTES.md

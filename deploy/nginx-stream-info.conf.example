@@ -1,0 +1,4 @@
+# Merge this line into /data/nginx/custom/server_stream_tcp.conf in NPM.
+# This custom include applies to EVERY TCP stream server, not just RDP.
+# Preserve all existing content. Review log volume and retention before reload.
+error_log /data/logs/rdpguard-stream-info.log info;
