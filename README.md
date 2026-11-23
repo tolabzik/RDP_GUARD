@@ -131,3 +131,7 @@ python -m ruff check src tests scripts
 PyInstaller собирается только на Windows x64. Для тестов ядра подходят Linux/macOS с Python 3.12+. Нативные тесты выключены по умолчанию; **только на одноразовой Windows VM** установите `RDP_GUARD_NATIVE_TESTS=1`. Они временно создают узкие правила на документационные IP и удаляют их в `finally`.
 
 Подробности: [архитектура и угрозы](docs/ARCHITECTURE.md), [эксплуатация](docs/OPERATIONS.md), [приёмка](docs/ACCEPTANCE.md), [тестирование](docs/TEST_REPORT.md), [известные ограничения](docs/LIMITATIONS.md).
+
+Исследовательский прототип для общего nginx stream описан в [наблюдении за прокси](docs/PROXY_OBSERVATION.md).
+Он сопоставляет диагностические выгрузки Windows и Linux, не входит в выпущенный
+установщик и не применяет блокировки.
