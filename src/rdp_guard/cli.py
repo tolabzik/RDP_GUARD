@@ -11,7 +11,7 @@ def parser():
     root.add_argument("--version", action="version", version=f"RDP Guard {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
     for name in ("status", "health", "preflight", "list-blocks", "list-whitelist", "monitor-only", "emergency-disable",
-                 "firewall-reconcile", "export-config", "watchdog", "has-admin"):
+                 "firewall-reconcile", "export-config", "watchdog", "has-admin", "proxy-status"):
         commands.add_parser(name)
     for name in ("block", "unblock", "whitelist-add", "whitelist-remove"):
         command = commands.add_parser(name)
@@ -24,6 +24,9 @@ def parser():
         command = commands.add_parser(name)
         command.add_argument("--username", required=True)
         command.add_argument("--password-stdin", action="store_true", help="Read a password from stdin (automation only)")
+    command = commands.add_parser("proxy-configure")
+    command.add_argument("--file", required=True, help="Local binding JSON with certificate paths")
+    command.add_argument("--confirmation", default="")
     return root
 
 
@@ -69,6 +72,12 @@ def main(argv=None):
             from .windows.ipc import PipeClient
             values = vars(args).copy()
             operation = values.pop("command")
+            if operation == "proxy-configure":
+                from pathlib import Path
+                file = Path(values.pop("file"))
+                if file.stat().st_size > 65536:
+                    raise ValueError("Proxy binding file is too large")
+                values["binding"] = json.loads(file.read_text(encoding="utf-8-sig"))
             result = PipeClient().call({"op": operation, "args": values})
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0

@@ -1,19 +1,20 @@
 """The diagnostic capture must preserve NAT identity and report evidence gaps."""
 
-import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import socket
 import struct
+import threading
+import time
+import subprocess
+import sys
 
 import pytest
 
+from rdp_guard import proxy_capture as capture
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "Capture-ProxyEvidence.py"
-SPEC = importlib.util.spec_from_file_location("proxy_capture", SCRIPT)
-capture = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(capture)
 
 
 def nla(kind, data):
@@ -179,6 +180,8 @@ def test_partial_initial_line_cannot_become_false_connection(tmp_path):
 
 @pytest.mark.parametrize("operation,reason", [("rotate", "rotated"), ("truncate", "truncated")])
 def test_log_generation_change_reports_gap(tmp_path, operation, reason):
+    if os.name == "nt" and operation == "rotate":
+        pytest.skip("Linux log rotation relies on renaming an open inode")
     path = tmp_path / "nginx.log"
     path.write_bytes(b"old line\n")
     tail = capture.LogTail(path, 100000)
@@ -206,7 +209,8 @@ def test_record_limit_still_allows_gap_and_capture_end(tmp_path):
     rows = [json.loads(line) for line in path.read_text().splitlines()]
     assert [row["kind"] for row in rows] == ["capture_start", "gap", "capture_end"]
     assert len({row["capture_id"] for row in rows}) == 1
-    assert os.stat(path).st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert os.stat(path).st_mode & 0o777 == 0o600
     with pytest.raises(FileExistsError):
         capture.Writer(path, 10)
 
@@ -223,3 +227,305 @@ def test_oversized_line_is_not_exported(tmp_path):
         assert not writer.records
     finally:
         tail.close()
+
+
+def continuous_config(tmp_path, **extra):
+    return {"nginx_log": str(tmp_path / "nginx.log"), "backend_ip": "79.140.26.181",
+            "backend_port": 45451, "listener_ip": None, "listener_port": 45451,
+            "nginx_utc_offset_minutes": 0, **extra}
+
+
+def wait_for(predicate, timeout=3):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.005)
+    raise AssertionError("capture did not reach expected state")
+
+
+class FakeSession:
+    def __init__(self, config, writer):
+        self.writer, self.closed = writer, False
+        self.ready, self.fail = threading.Event(), None
+        self.emitted_dump = False
+        writer.emit("capture_start", previous_epoch_error=writer.previous_error)
+
+    def poll(self, wait=0.1, checkpoint=True):
+        self.ready.wait(min(wait, 0.01))
+        if self.fail:
+            raise self.fail
+        if not self.ready.is_set() or not checkpoint:
+            return False
+        if not self.emitted_dump:
+            self.writer.emit("snapshot_end", lifecycle_complete=False)
+            self.writer.emit("nginx_line", line="an actually observed line")
+            self.emitted_dump = True
+        return True
+
+    def close(self):
+        self.closed = True
+
+
+def start_fake_capture(monkeypatch, tmp_path, **config):
+    sessions = []
+
+    def factory(config, writer):
+        session = FakeSession(config, writer)
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(capture, "CaptureSession", factory)
+    stop = threading.Event()
+    observer = capture.ContinuousCapture(continuous_config(tmp_path, **config), stop).start()
+    wait_for(lambda: sessions)
+    return observer, stop, sessions
+
+
+def stop_capture(observer, stop):
+    stop.set()
+    observer.join(2)
+    assert not observer._thread.is_alive()
+
+
+def test_continuous_waits_for_real_drain_and_snapshot_is_immutable(monkeypatch, tmp_path):
+    observer, stop, sessions = start_fake_capture(monkeypatch, tmp_path)
+    try:
+        assert observer.snapshot()["healthy"] is False
+        assert observer.snapshot()["checkpoint_utc"] is None
+        assert observer.snapshot()["records"] == []
+        sessions[0].ready.set()
+        snapshot = wait_for(lambda: observer.snapshot() if observer.snapshot()["healthy"] else None)
+        assert [r["kind"] for r in snapshot["records"]] == [
+            "capture_start", "snapshot_end", "nginx_line", "capture_end"]
+        assert snapshot["records"][-1]["complete"] is True
+        assert snapshot["records"][-1]["checkpoint"] is True
+        assert snapshot["records"][-1]["snapshot_of_open_epoch"] is True
+        assert snapshot["checkpoint_utc"] == snapshot["records"][-1]["observed_utc"]
+        checkpoint = snapshot["checkpoint_utc"]
+        snapshot["records"][2]["line"] = "caller mutated its copy"
+        # Reading the snapshot must not forge a fresh end timestamp.
+        assert observer.snapshot()["checkpoint_utc"] == checkpoint
+        assert observer.snapshot()["records"][2]["line"] == "an actually observed line"
+        assert len(sessions) == 1
+        observer.start()  # Idempotent; no second subscription thread.
+        assert len(sessions) == 1
+    finally:
+        stop_capture(observer, stop)
+    assert sessions[0].closed
+    assert observer.snapshot()["healthy"] is False
+    assert observer.snapshot()["error"] == "capture_stopped"
+
+
+def test_stale_checkpoint_is_unavailable_without_forging_new_boundary(monkeypatch, tmp_path):
+    observer, stop, sessions = start_fake_capture(monkeypatch, tmp_path)
+    try:
+        sessions[0].ready.set()
+        wait_for(lambda: observer.snapshot()["healthy"])
+        checkpoint = observer.snapshot()["checkpoint_utc"]
+        sessions[0].ready.clear()  # Inputs no longer drain.
+        observer._clock = lambda: time.monotonic() + 11
+        snapshot = observer.snapshot()
+        assert not snapshot["healthy"]
+        assert snapshot["error"] == "capture_checkpoint_stale"
+        assert snapshot["checkpoint_utc"] == checkpoint
+        assert snapshot["records"] == []
+    finally:
+        stop_capture(observer, stop)
+
+
+@pytest.mark.parametrize("error,reason", [
+    (capture.CaptureError("nginx_log_rotated"), "nginx_log_rotated"),
+    (capture.CaptureError("nginx_log_truncated"), "nginx_log_truncated"),
+    (OSError(capture.errno.ENOBUFS, "lost events"), "netlink_enobufs"),
+    (capture.CaptureError("nginx_scoped_namespace_not_observed"), "nginx_scoped_namespace_not_observed"),
+    (capture.CaptureError("record_limit_reached"), "record_limit_reached"),
+])
+def test_detected_gap_withdraws_old_checkpoint_and_restarts_epoch(monkeypatch, tmp_path, error, reason):
+    observer, stop, sessions = start_fake_capture(monkeypatch, tmp_path)
+    try:
+        sessions[0].ready.set()
+        wait_for(lambda: observer.snapshot()["healthy"])
+        old_epoch = observer.snapshot()["epoch"]
+        sessions[0].fail = error
+        wait_for(lambda: observer.snapshot()["error"] == reason)
+        assert not observer.snapshot()["healthy"]
+        assert observer.snapshot()["records"] == []
+        wait_for(lambda: len(sessions) == 2)
+        assert sessions[0].closed
+        assert observer.snapshot()["epoch"] != old_epoch
+        assert not observer.snapshot()["healthy"]
+        sessions[1].ready.set()
+        snapshot = wait_for(lambda: observer.snapshot() if observer.snapshot()["healthy"] else None)
+        assert snapshot["records"][0]["previous_epoch_error"] == reason
+        assert all(row["capture_id"] == snapshot["epoch"] for row in snapshot["records"])
+    finally:
+        stop_capture(observer, stop)
+
+
+def test_epoch_duration_is_bounded_and_old_history_not_reused(monkeypatch, tmp_path):
+    observer, stop, sessions = start_fake_capture(monkeypatch, tmp_path, epoch_seconds=10)
+    try:
+        sessions[0].ready.set()
+        wait_for(lambda: observer.snapshot()["healthy"])
+        old_epoch = observer.snapshot()["epoch"]
+        observer._clock = lambda: time.monotonic() + 11
+        wait_for(lambda: observer.snapshot()["error"] == "epoch_time_limit_reached")
+        assert observer.snapshot()["records"] == []
+        wait_for(lambda: len(sessions) == 2)
+        assert sessions[0].closed
+        assert observer.snapshot()["epoch"] != old_epoch
+    finally:
+        stop_capture(observer, stop)
+
+
+def test_memory_record_and_byte_bounds_and_input_immutability():
+    writer = capture.MemoryWriter(2, 100000)
+    value = {"nested": [1]}
+    writer.emit("capture_start", value=value)
+    value["nested"].append(2)
+    assert writer.records[0]["value"] == {"nested": [1]}
+    writer.emit("snapshot_end")
+    with pytest.raises(capture.CaptureError, match="record_limit_reached"):
+        writer.emit("anything")
+    assert len(writer.records) == 2
+    bounded = capture.MemoryWriter(100, 300)
+    with pytest.raises(capture.CaptureError, match="memory_byte_limit_reached"):
+        bounded.emit("nginx_line", line="x" * 301)
+    assert bounded.records == [] and bounded.bytes == 0
+
+
+def test_config_defaults_and_invalid_limits(tmp_path):
+    config = capture.capture_config(continuous_config(tmp_path))
+    assert config["max_records"] == 100000
+    assert config["max_log_bytes"] == 64 * 1024 * 1024
+    assert config["epoch_seconds"] == 900
+    for bad in ({"nginx_log": "relative"}, {"max_records": 99}, {"backend_port": True},
+                {"epoch_seconds": 0}, {"max_log_bytes": 129 * 1024 * 1024}):
+        with pytest.raises(ValueError):
+            capture.capture_config(continuous_config(tmp_path, **bad))
+
+
+def test_linux_config_keeps_posix_path_when_validated_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(capture, "Path", PureWindowsPath)
+    cfg = capture.capture_config(continuous_config(tmp_path, nginx_log="/srv/npm/data/logs/stream.log"))
+    assert cfg["nginx_log"] == "/srv/npm/data/logs/stream.log"
+    native = capture.capture_config(continuous_config(tmp_path, nginx_log=r"C:\capture\stream.log"))
+    assert native["nginx_log"] == r"C:\capture\stream.log"
+    with pytest.raises(ValueError, match="absolute"):
+        capture.capture_config(continuous_config(tmp_path, nginx_log=r"capture\stream.log"))
+
+
+class FakeSocket:
+    def __init__(self):
+        self.queue, self.closed = [], False
+
+    def recvmsg(self, limit):
+        return self.queue.pop(0), [], 0, (0, 0)
+
+    def close(self):
+        self.closed = True
+
+
+def native_session(monkeypatch, tmp_path):
+    path = tmp_path / "nginx.log"
+    path.write_text("")
+    session = capture.CaptureSession.__new__(capture.CaptureSession)
+    session.writer = capture.MemoryWriter(100, 100000)
+    session.tail = capture.LogTail(path, 100000)
+    session.events, session.dump = FakeSocket(), FakeSocket()
+    session.sockets = [session.events, session.dump]
+    session.dump_done, session.seq = False, 7
+    session.backend = {"ip": "79.140.26.181", "port": 45451}
+    session.began, session.began_wall = time.monotonic(), time.time()
+    session.next_process_check, session.dump_deadline = time.monotonic() + 1, time.monotonic() + 10
+    processes = [process(1000, 1, 1)]
+    session.process_tracker = capture.ProcessTracker(processes)
+    monkeypatch.setattr(capture, "nginx_processes", lambda: processes.copy())
+    monkeypatch.setattr(capture.select, "select", lambda inputs, *args: ([s for s in inputs if s.queue], [], []))
+    return session, path, processes
+
+
+def message(kind, body=b"", seq=7):
+    return struct.pack("=IHHII", 16 + len(body), kind, 0, seq, 0) + body
+
+
+def test_native_drain_requires_dump_done_empty_queues_and_complete_log(monkeypatch, tmp_path):
+    session, path, _ = native_session(monkeypatch, tmp_path)
+    try:
+        assert not session.poll(wait=0)
+        assert session.writer.records == []
+        session.dump.queue.append(message(3))
+        path.write_text("unfinished")
+        assert not session.poll(wait=0)
+        assert session.dump_done and session.dump.closed
+        with path.open("a") as log:
+            log.write(" line\n")
+        body, _ = conn_event()
+        session.events.queue.extend([message(0x100, body), message(0x102, body)])
+        assert not session.poll(wait=0)  # One queued datagram remains.
+        assert session.poll(wait=0)
+        assert [row["kind"] for row in session.writer.records] == [
+            "snapshot_end", "nginx_line", "conntrack", "conntrack"]
+        assert not session.events.queue
+    finally:
+        session.close()
+
+
+def test_native_worker_turnover_preserves_epoch_but_reuse_invalidates(monkeypatch, tmp_path):
+    session, _, processes = native_session(monkeypatch, tmp_path)
+    try:
+        session.dump.queue.append(message(3))
+        assert session.poll(wait=0)
+        worker = process(1001, 2, 2)
+        processes.append(worker)
+        assert session.poll(wait=0)
+        processes.remove(worker)
+        assert session.poll(wait=0)
+        assert len([r for r in session.writer.records if r["kind"] == "nginx_process_change"]) == 2
+        processes.append(process(1005, 2, 99))
+        with pytest.raises(capture.CaptureError, match="pid_reused"):
+            session.poll(wait=0)
+    finally:
+        session.close()
+
+
+def test_native_clock_step_prevents_checkpoint(monkeypatch, tmp_path):
+    session, _, _ = native_session(monkeypatch, tmp_path)
+    try:
+        session.dump.queue.append(message(3))
+        session.began_wall -= 10
+        with pytest.raises(capture.CaptureError, match="host_clock_stepped"):
+            session.poll(wait=0)
+    finally:
+        session.close()
+
+
+def test_standalone_compatibility_entry_point_help():
+    result = subprocess.run([sys.executable, str(SCRIPT), "--help"], text=True, capture_output=True)
+    assert result.returncode == 0
+    assert "--nginx-log" in result.stdout
+    assert "--backend-ip" in result.stdout
+
+
+def test_gap_detected_while_copying_cannot_return_old_healthy_snapshot(monkeypatch, tmp_path):
+    observer, stop, sessions = start_fake_capture(monkeypatch, tmp_path)
+    try:
+        sessions[0].ready.set()
+        wait_for(lambda: observer.snapshot()["healthy"])
+        sessions[0].ready.clear()
+        original_copy = capture.deepcopy
+
+        def copy_during_gap(value):
+            result = original_copy(value)
+            observer._unavailable("netlink_enobufs")
+            return result
+
+        monkeypatch.setattr(capture, "deepcopy", copy_during_gap)
+        result = observer.snapshot()
+        assert result["healthy"] is False
+        assert result["error"] == "netlink_enobufs"
+        assert result["records"] == []
+    finally:
+        stop_capture(observer, stop)
