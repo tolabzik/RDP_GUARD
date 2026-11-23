@@ -36,8 +36,8 @@ def ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def run_export(tmp_path, events=(), *, error=None, max_events=50, start="2026-11-23T16:54:28Z",
-               end="2026-11-23T16:54:30Z", existing=False):
+def run_export(tmp_path, events=(), *, error=None, max_events=50, start="2000-11-23T16:54:28Z",
+               end="2000-11-23T16:54:30Z", existing=False):
     fixture = tmp_path / "fixture.json"
     fixture.write_text(json.dumps({"events": list(events), "error": error}), encoding="utf-8")
     output = tmp_path / "evidence.json"
@@ -70,14 +70,14 @@ def run_export(tmp_path, events=(), *, error=None, max_events=50, start="2026-11
 
 
 def test_export_preserves_native_evidence_and_distinguishes_lookback(tmp_path):
-    antecedent = event(131, 10, "2026-11-23T16:54:27.9912345Z")
-    failure = event(140, 11, "2026-11-23T16:54:28.1234567Z")
+    antecedent = event(131, 10, "2000-11-23T16:54:27.9912345Z")
+    failure = event(140, 11, "2000-11-23T16:54:28.1234567Z")
     result, output = run_export(tmp_path, [failure, antecedent])
     assert result.returncode == 0, result.stdout + result.stderr
     assert not output.read_bytes().startswith(b"\xef\xbb\xbf")
     evidence = json.loads(output.read_text(encoding="utf-8"))
     assert evidence["complete"] is True and evidence["truncated"] is False
-    assert evidence["query_start_utc"] == "2026-11-23T16:54:23.0000000Z"
+    assert evidence["query_start_utc"] == "2000-11-23T16:54:23.0000000Z"
     assert evidence["event_count"] == 2
     first, second = evidence["events"]
     assert first["in_requested_window"] is False and second["in_requested_window"] is True
@@ -89,10 +89,10 @@ def test_export_preserves_native_evidence_and_distinguishes_lookback(tmp_path):
 
 
 def test_export_window_is_half_open_and_only_connections_use_lookback(tmp_path):
-    records = [event(140, 1, "2026-11-23T16:54:27Z"),
-               event(131, 2, "2026-11-23T16:54:22Z"),
-               event(140, 3, "2026-11-23T16:54:28Z"),
-               event(131, 4, "2026-11-23T16:54:30Z")]
+    records = [event(140, 1, "2000-11-23T16:54:27Z"),
+               event(131, 2, "2000-11-23T16:54:22Z"),
+               event(140, 3, "2000-11-23T16:54:28Z"),
+               event(131, 4, "2000-11-23T16:54:30Z")]
     result, output = run_export(tmp_path, records)
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(output.read_text(encoding="utf-8"))
@@ -101,7 +101,7 @@ def test_export_window_is_half_open_and_only_connections_use_lookback(tmp_path):
 
 
 def test_cap_is_explicit_and_incomplete_artifact_is_retained(tmp_path):
-    records = [event(140, number, "2026-11-23T16:54:29Z") for number in range(3)]
+    records = [event(140, number, "2000-11-23T16:54:29Z") for number in range(3)]
     result, output = run_export(tmp_path, records, max_events=2)
     assert result.returncode == 2, result.stdout + result.stderr
     evidence = json.loads(output.read_text(encoding="utf-8"))
@@ -121,7 +121,7 @@ def test_empty_log_differs_from_unreadable_log(tmp_path, error, code, complete):
 
 
 def test_invalid_record_marks_export_incomplete(tmp_path):
-    result, output = run_export(tmp_path, [event(140, 1, "2026-11-23T16:54:29Z", provider="Other")])
+    result, output = run_export(tmp_path, [event(140, 1, "2000-11-23T16:54:29Z", provider="Other")])
     assert result.returncode == 2, result.stdout + result.stderr
     evidence = json.loads(output.read_text(encoding="utf-8"))
     assert not evidence["complete"] and evidence["events"] == []
@@ -129,9 +129,9 @@ def test_invalid_record_marks_export_incomplete(tmp_path):
 
 
 @pytest.mark.parametrize("start,end", [
-    ("2026-11-23T16:54:28", "2026-11-23T16:54:30Z"),
-    ("2026-11-23T16:54:30Z", "2026-11-23T16:54:28Z"),
-    ("2026-11-21T16:54:28Z", "2026-11-23T16:54:30Z"),
+    ("2000-11-23T16:54:28", "2000-11-23T16:54:30Z"),
+    ("2000-11-23T16:54:30Z", "2000-11-23T16:54:28Z"),
+    ("2000-11-21T16:54:28Z", "2000-11-23T16:54:30Z"),
 ])
 def test_invalid_or_unbounded_window_creates_no_artifact(tmp_path, start, end):
     result, output = run_export(tmp_path, start=start, end=end)
@@ -145,8 +145,15 @@ def test_existing_evidence_is_not_overwritten(tmp_path):
     assert output.read_text(encoding="utf-8") == "existing evidence"
 
 
+def test_future_window_cannot_be_reported_complete(tmp_path):
+    result, output = run_export(tmp_path, start="2999-11-23T16:54:28Z", end="2999-11-23T16:54:30Z")
+    assert result.returncode != 0
+    assert "future" in result.stderr
+    assert not output.exists()
+
+
 def test_explicit_offset_is_normalized_to_utc(tmp_path):
-    result, output = run_export(tmp_path, start="2026-11-23T17:54:28+01:00", end="2026-11-23T17:54:30+01:00")
+    result, output = run_export(tmp_path, start="2000-11-23T17:54:28+01:00", end="2000-11-23T17:54:30+01:00")
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(output.read_text(encoding="utf-8"))
-    assert evidence["requested_start_utc"] == "2026-11-23T16:54:28.0000000Z"
+    assert evidence["requested_start_utc"] == "2000-11-23T16:54:28.0000000Z"

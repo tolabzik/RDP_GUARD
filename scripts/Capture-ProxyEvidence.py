@@ -134,6 +134,43 @@ def nginx_processes(proc_root=Path("/proc")):
     return sorted(result, key=lambda item: item["host_pid"])
 
 
+class ProcessTracker:
+    """Allow graceful worker turnover while refusing a reused log PID identity."""
+    def __init__(self, processes, namespace=None):
+        namespaces = {item["pid_namespace"] for item in processes}
+        if namespace is None:
+            if len(namespaces) != 1:
+                raise CaptureError("nginx_pid_namespace_missing_or_ambiguous")
+            namespace = next(iter(namespaces))
+        self.namespace, self.seen, self.current = namespace, {}, {}
+        self.observe(processes)
+
+    def observe(self, processes):
+        selected = [item for item in processes if item["pid_namespace"] == self.namespace]
+        if not selected:
+            raise CaptureError("nginx_scoped_namespace_not_observed")
+        current = {}
+        for item in selected:
+            if not item["namespace_pids"]:
+                raise CaptureError("nginx_namespace_pid_missing")
+            key = (self.namespace, item["namespace_pids"][-1])
+            identity = (item["start_ticks"], item["host_pid"])
+            if key in current:
+                raise CaptureError("duplicate_nginx_namespace_pid")
+            if key in self.seen and self.seen[key] != identity:
+                raise CaptureError("nginx_namespace_pid_reused")
+            self.seen[key] = identity  # Retain exited PIDs for the entire capture.
+            current[key] = item
+        added = [current[key] for key in current.keys() - self.current.keys()]
+        removed = [self.current[key] for key in self.current.keys() - current.keys()]
+        self.current = current
+        return {"added": sorted(added, key=lambda item: item["host_pid"]),
+                "removed": sorted(removed, key=lambda item: item["host_pid"])} if added or removed else None
+
+    def snapshot(self):
+        return sorted(self.current.values(), key=lambda item: item["host_pid"])
+
+
 class Writer:
     def __init__(self, path, limit):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -218,19 +255,21 @@ def run(args):
     sockets, tail, complete = [], None, False
     began = time.monotonic()
     began_wall = time.time()
-    first_processes = []
+    process_tracker = None
     try:
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-        first_processes = nginx_processes()
+        process_tracker = ProcessTracker(nginx_processes(), args.nginx_pid_namespace)
         writer.emit(
             "capture_start", backend=backend,
             listener={"ip": args.listener_ip, "port": args.listener_port},
             nginx_utc_offset_minutes=args.nginx_utc_offset_minutes, boot_id=boot_id,
-            nginx_processes=first_processes, nginx_log=str(Path(args.nginx_log).absolute()),
+            nginx_processes=process_tracker.snapshot(), nginx_pid_namespace=process_tracker.namespace,
+            nginx_log=str(Path(args.nginx_log).absolute()),
             duration_seconds=args.duration, initial_snapshot_lifecycle_complete=False,
             nginx_start_at_eof=True,
             limitations=["Diagnostic only; no blocking.", "No detected gap does not prove lossless capture.",
-                         "Container PID and host PID namespaces differ; process metadata is informational."],
+                         "Process snapshots are sampled once per second; short-lived processes may be missed.",
+                         "The caller must scope the PID namespace to the nginx instance writing this log."],
         )
         event_setting = Path("/proc/sys/net/netfilter/nf_conntrack_events")
         if event_setting.exists() and event_setting.read_text().strip() == "0":
@@ -291,8 +330,11 @@ def run(args):
             if time.monotonic() >= next_process_check:
                 if abs((time.time() - began_wall) - (time.monotonic() - began)) > 1:
                     raise CaptureError("host_clock_stepped")
-                if nginx_processes() != first_processes:
-                    raise CaptureError("nginx_process_set_changed")
+                changes = process_tracker.observe(nginx_processes())
+                if changes:
+                    writer.emit("nginx_process_change", pid_namespace=process_tracker.namespace, **changes)
+                    writer.emit("nginx_process_snapshot", pid_namespace=process_tracker.namespace,
+                                nginx_processes=process_tracker.snapshot())
                 next_process_check = time.monotonic() + 1
             if cutoff and not ready and os.fstat(tail.file.fileno()).st_size == tail.file.tell():
                 if tail.buffer:
@@ -302,8 +344,11 @@ def run(args):
             raise CaptureError("initial_dump_incomplete")
         if abs((time.time() - began_wall) - (time.monotonic() - began)) > 1:
             raise CaptureError("host_clock_stepped")
-        if nginx_processes() != first_processes:
-            raise CaptureError("nginx_process_set_changed")
+        changes = process_tracker.observe(nginx_processes())
+        if changes:
+            writer.emit("nginx_process_change", pid_namespace=process_tracker.namespace, **changes)
+            writer.emit("nginx_process_snapshot", pid_namespace=process_tracker.namespace,
+                        nginx_processes=process_tracker.snapshot())
         complete = True
     except KeyboardInterrupt:
         writer.gap("interrupted_by_operator")
@@ -333,6 +378,9 @@ def main():
     parser.add_argument("--listener-ip", default=None)
     parser.add_argument("--listener-port", required=True, type=int)
     parser.add_argument("--nginx-utc-offset-minutes", required=True, type=int)
+    parser.add_argument("--nginx-pid-namespace",
+                        help="Exact /proc/PID/ns/pid link, e.g. pid:[4026532278]. "
+                             "Required when multiple nginx PID namespaces exist.")
     parser.add_argument("--duration", type=float, default=60)
     parser.add_argument("--output", required=True, help="New JSONL file; existing files are never overwritten.")
     parser.add_argument("--max-records", type=int, default=100000)

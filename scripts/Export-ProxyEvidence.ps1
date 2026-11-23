@@ -109,6 +109,9 @@ $rdpGuardEnd = ConvertTo-ExplicitUtc $EndUtc 'EndUtc'
 if ($rdpGuardEnd -le $rdpGuardStart -or ($rdpGuardEnd - $rdpGuardStart).TotalHours -gt 24) {
     throw 'The requested interval must be positive and no longer than 24 hours.'
 }
+if ($rdpGuardEnd -gt [DateTimeOffset]::UtcNow) {
+    throw 'EndUtc is in the future; wait until the entire requested interval has elapsed before exporting.'
+}
 $rdpGuardQueryStart = $rdpGuardStart.AddSeconds(-$LookbackSeconds)
 $rdpGuardOutput = [System.IO.Path]::GetFullPath($OutputPath)
 if (Test-Path -LiteralPath $rdpGuardOutput) { throw 'OutputPath already exists; choose a new evidence file.' }

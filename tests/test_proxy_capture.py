@@ -92,6 +92,52 @@ def test_successful_dump_done(body):
     capture.check_dump_done(body)
 
 
+def process(host_pid, namespace_pid, start_ticks, namespace="pid:[1234]"):
+    return {"host_pid": host_pid, "namespace_pids": [host_pid, namespace_pid],
+            "start_ticks": start_ticks, "pid_namespace": namespace}
+
+
+def test_draining_worker_exit_and_new_worker_do_not_create_gap():
+    master, old, new = process(1000, 1, 10), process(1001, 2, 20), process(1002, 3, 30)
+    tracker = capture.ProcessTracker([master, old])
+    change = tracker.observe([master, old, new])
+    assert change == {"added": [new], "removed": []}
+    change = tracker.observe([master, new])
+    assert change == {"added": [], "removed": [old]}
+    assert tracker.observe([new, master]) is None
+
+
+def test_reused_namespace_pid_is_gap_even_after_original_process_exits():
+    master, old = process(1000, 1, 10), process(1001, 2, 20)
+    tracker = capture.ProcessTracker([master, old])
+    tracker.observe([master])
+    with pytest.raises(capture.CaptureError, match="pid_reused"):
+        tracker.observe([master, process(1010, 2, 40)])
+
+
+def test_same_host_pid_with_changed_start_ticks_is_gap():
+    master = process(1000, 1, 10)
+    tracker = capture.ProcessTracker([master])
+    with pytest.raises(capture.CaptureError, match="pid_reused"):
+        tracker.observe([process(1000, 1, 99)])
+
+
+def test_multiple_namespaces_require_explicit_scope():
+    first, other = process(1000, 1, 10), process(2000, 1, 10, "pid:[5678]")
+    with pytest.raises(capture.CaptureError, match="namespace_missing_or_ambiguous"):
+        capture.ProcessTracker([first, other])
+    tracker = capture.ProcessTracker([first, other], "pid:[1234]")
+    assert tracker.snapshot() == [first]
+    assert tracker.observe([first, other, process(2001, 2, 30, "pid:[5678]")]) is None
+
+
+def test_scoped_namespace_disappearance_is_not_silently_ignored():
+    first, other = process(1000, 1, 10), process(2000, 1, 10, "pid:[5678]")
+    tracker = capture.ProcessTracker([first, other], "pid:[1234]")
+    with pytest.raises(capture.CaptureError, match="scoped_namespace_not_observed"):
+        tracker.observe([other])
+
+
 class MemoryWriter:
     def __init__(self):
         self.records = []
