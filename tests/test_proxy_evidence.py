@@ -58,12 +58,18 @@ def evidence():
         ],
     }
     linux = [record("capture_start", 10, nginx_utc_offset_minutes=0,
+                    nginx_pid_namespace="pid:[123]", nginx_processes=[process()],
                     backend={"ip": "203.0.113.20", "port": 45451},
                     listener={"ip": "203.0.113.10", "port": 45451})]
     linux += [record("nginx_line", 24, line=line, source_inode=1234, offset=index * 100)
               for index, line in enumerate(connection_lines())]
     linux += [nat(), record("capture_end", 40, complete=True)]
     return windows, linux
+
+
+def process(log_pid=123, host_pid=1000, start_ticks=100):
+    return {"host_pid": host_pid, "namespace_pids": [host_pid, log_pid],
+            "start_ticks": start_ticks, "pid_namespace": "pid:[123]"}
 
 
 def result(windows, linux):
@@ -276,6 +282,56 @@ def test_invalid_conntrack_metadata_blocks_report(change, value):
     linux[-2][change] = value
     report = correlate_evidence(windows, linux)
     assert "invalid_conntrack_record" in report["issues"]
+    assert report["counts"]["demonstrated_candidates"] == 0
+
+
+def test_unknown_nginx_namespace_pid_never_maps_despite_complete_socket_logs():
+    windows, linux = evidence()
+    linux[0]["nginx_processes"] = [process(log_pid=124)]
+    assert result(windows, linux)["reason"] == "unknown_nginx_process_identity"
+
+
+def test_host_pid_is_not_mistaken_for_nginx_namespace_pid():
+    windows, linux = evidence()
+    linux[0]["nginx_processes"] = [process(log_pid=999, host_pid=123)]
+    assert result(windows, linux)["reason"] == "unknown_nginx_process_identity"
+
+
+@pytest.mark.parametrize("kind", ["nginx_process_change", "nginx_process_snapshot"])
+def test_new_worker_observed_after_log_record_is_accepted(kind):
+    windows, linux = evidence()
+    linux[0]["nginx_processes"] = [process(log_pid=124)]
+    values = {"added": [process()], "removed": []} if kind == "nginx_process_change" else {
+        "nginx_processes": [process()]}
+    linux.insert(-1, record(kind, 25, pid_namespace="pid:[123]", **values))
+    assert result(windows, linux)["status"] == "demonstrated_candidate"
+
+
+def test_graceful_worker_exit_does_not_invalidate_observed_connection():
+    windows, linux = evidence()
+    linux.insert(-1, record("nginx_process_change", 25, pid_namespace="pid:[123]",
+                            added=[process(log_pid=124, host_pid=1001)], removed=[process()]))
+    linux.insert(-1, record("nginx_process_snapshot", 25, pid_namespace="pid:[123]",
+                            nginx_processes=[process(log_pid=124, host_pid=1001)]))
+    assert result(windows, linux)["status"] == "demonstrated_candidate"
+
+
+def test_reused_namespace_pid_with_new_start_time_blocks_capture():
+    windows, linux = evidence()
+    linux.insert(-1, record("nginx_process_change", 25, pid_namespace="pid:[123]",
+                            added=[process(start_ticks=200)], removed=[]))
+    report = correlate_evidence(windows, linux)
+    assert "nginx_namespace_pid_reused" in report["issues"]
+    assert report["counts"]["demonstrated_candidates"] == 0
+
+
+def test_process_metadata_from_another_namespace_cannot_supply_log_pid():
+    windows, linux = evidence()
+    linux[0]["nginx_processes"] = []
+    linux.insert(-1, record("nginx_process_snapshot", 25, pid_namespace="pid:[999]",
+                            nginx_processes=[process()]))
+    report = correlate_evidence(windows, linux)
+    assert "mixed_nginx_pid_namespaces" in report["issues"]
     assert report["counts"]["demonstrated_candidates"] == 0
 
 

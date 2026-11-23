@@ -27,6 +27,7 @@ LIMITATIONS = [
     "ActivityID linkage is empirical for the captured Windows build, not proof against client-controlled IDs.",
     "Clock bounds, event loss outside the capture, and connection reuse outside the capture are not proven.",
     "A conntrack snapshot proves an observed tuple mapping, not its complete lifecycle.",
+    "Nginx process identities are sampled; a worker never observed in process metadata cannot be correlated.",
     "Any additional source IP/port translation between the recorded backend and Windows must be accounted for; "
     "an unchanged proxy IP alone does not prove source-port preservation.",
 ]
@@ -147,6 +148,28 @@ def read_linux(records: list[dict]) -> tuple[dict, list[Connection], list[dict],
         issues.append("linux_capture_reported_errors")
     connections = {}
     nat = []
+    process_identities = {}
+    process_namespace = metadata.get("nginx_pid_namespace")
+    if not isinstance(process_namespace, str) or not process_namespace:
+        issues.append("missing_nginx_pid_namespace")
+
+    def observe_processes(items, *, allow_new=True):
+        for item in items:
+            try:
+                if item["pid_namespace"] != process_namespace:
+                    raise ValueError("Process belongs to another PID namespace")
+                log_pid = integer(item["namespace_pids"][-1], 1)
+                identity = (integer(item["host_pid"], 1), integer(item["start_ticks"]))
+                if log_pid not in process_identities and not allow_new:
+                    issues.append("removed_nginx_process_was_not_observed")
+                elif log_pid in process_identities and process_identities[log_pid] != identity:
+                    issues.append("nginx_namespace_pid_reused")
+                else:
+                    process_identities[log_pid] = identity
+            except (KeyError, ValueError, TypeError, IndexError):
+                issues.append("invalid_nginx_process_identity")
+
+    observe_processes(metadata.get("nginx_processes", []))
     for record in records:
         if record.get("capture_id") != capture_id:
             issues.append("mixed_capture_epochs")
@@ -154,6 +177,17 @@ def read_linux(records: list[dict]) -> tuple[dict, list[Connection], list[dict],
         kind = record.get("kind")
         if kind == "gap":
             issues.append("linux_capture_gap:" + str(record.get("reason", "unknown")))
+        elif kind in ("nginx_process_change", "nginx_process_snapshot"):
+            if record.get("pid_namespace") != process_namespace:
+                issues.append("mixed_nginx_pid_namespaces")
+                continue
+            if kind == "nginx_process_change":
+                observe_processes(record.get("added", []))
+                # Removed identities remain known for the entire capture: graceful
+                # draining or worker exit must not invalidate already observed flows.
+                observe_processes(record.get("removed", []), allow_new=False)
+            else:
+                observe_processes(record.get("nginx_processes", []))
         elif kind == "conntrack":
             try:
                 original, reply = flow_tuple(record["original"]), flow_tuple(record["reply"])
@@ -201,6 +235,9 @@ def read_linux(records: list[dict]) -> tuple[dict, list[Connection], list[dict],
                 connection.closed = timestamp
             elif any(term in message for term in ("connect() failed", "timed out", "no live upstreams")):
                 connection.errors.append("nginx_connection_error")
+    for connection in connections.values():
+        if connection.key[1] not in process_identities:
+            connection.errors.append("unknown_nginx_process_identity")
     metadata = dict(metadata, _start=start, _end=end)
     return metadata, list(connections.values()), nat, sorted(set(issues))
 
@@ -321,7 +358,8 @@ def correlate_evidence(windows_export: dict, linux_records: list[dict]) -> dict:
                 continue
             connection = generations[0]
             if not connection.complete(capture["_start"], capture["_end"]):
-                rejected.add("incomplete_nginx_lifecycle")
+                rejected.add("unknown_nginx_process_identity" if "unknown_nginx_process_identity"
+                             in connection.errors else "incomplete_nginx_lifecycle")
                 continue
             if connection.listener[1] != listener_port or (listener_ip is not None
                     and connection.listener[0] not in (listener_ip, "0.0.0.0", "::")):
