@@ -45,7 +45,7 @@ def wait_ready(probe, seconds=90):
         except Exception as exc:
             last = exc
             time.sleep(1)
-    raise RuntimeError("Disposable NPM did not become ready") from last
+    raise RuntimeError(f"Disposable NPM did not become ready: {last}") from last
 
 
 def probe():
@@ -166,6 +166,10 @@ server {{
             log = data / "logs" / "rdpguard-stream-info.log"
 
             def logged():
+                # nginx -s reload acknowledges delivery of the signal, not that
+                # new workers have taken over. Keep producing test traffic until
+                # the worker with the new INFO configuration accepts a socket.
+                probe()
                 if not log.is_file() or "client" not in log.read_text(errors="replace"):
                     raise RuntimeError("NPM INFO connection evidence not written")
 
@@ -204,6 +208,16 @@ server {{
             passed("rollback_restores_configuration_and_forwarding")
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
+            # Only our synthetic stream/include/logs, never generic container
+            # startup output (which may contain generated admin credentials).
+            diagnostics = {}
+            for name in ("nginx/stream/987654.conf", "nginx/custom/server_stream_tcp.conf",
+                         "logs/rdpguard-stream-info.log", "logs/stream-987654_error.log"):
+                path = root / "data" / name
+                diagnostics[name] = path.read_text(errors="replace")[-8192:] if path.is_file() else "absent"
+            output = Path("test-results")
+            output.mkdir(exist_ok=True)
+            (output / "npm-fixture-diagnostics.json").write_text(json.dumps(diagnostics, indent=2) + "\n")
         finally:
             if server is not None:
                 server.shutdown()
