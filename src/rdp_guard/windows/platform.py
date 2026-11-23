@@ -5,11 +5,14 @@ import os
 from pathlib import Path
 import socket
 import sys
+import time
 
 from ..models import address
 
 DATA_DIR = Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "RDPGuard"
 PIPE_NAME = r"\\.\pipe\RDPGuard.v1"
+SESSION_RETRY_SECONDS = 2.0
+SESSION_RETRY_INTERVAL = 0.1
 
 
 def require_windows():
@@ -72,11 +75,28 @@ def firewall_mutex():
 
 
 class WindowsSafety:
-    def __init__(self):
+    def __init__(self, monotonic=time.monotonic, sleep=time.sleep):
         from .sessions import SessionSourceResolver
         self._sources = SessionSourceResolver()
+        self._monotonic, self._sleep = monotonic, sleep
 
     def sessions(self):
+        # WTS can expose a new connection before its LSM record is readable.
+        # Retry the whole inventory so a disconnect/reconnect during enumeration
+        # also gets a fresh identity. Never reuse a failed or stale binding.
+        deadline = self._monotonic() + SESSION_RETRY_SECONDS
+        snapshot = self._sessions_once()
+        while not snapshot["healthy"]:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                break
+            self._sleep(min(SESSION_RETRY_INTERVAL, remaining))
+            if self._monotonic() >= deadline:
+                break
+            snapshot = self._sessions_once()
+        return snapshot
+
+    def _sessions_once(self):
         import win32security
         import win32ts
         sessions = []
@@ -189,7 +209,6 @@ class WindowsSafety:
 
     @staticmethod
     def _watchdog_age():
-        import time
         return time.time() - (DATA_DIR / "watchdog.alive").stat().st_mtime
 
 
