@@ -4,9 +4,11 @@
 set -euo pipefail
 umask 077
 
-readonly RELEASE_TAG='v1.1.0-rc.1'
-readonly PACKAGE_VERSION='1.1.0~rc1'
-readonly PACKAGE="rdpguard-proxy_${PACKAGE_VERSION}_amd64.deb"
+readonly RELEASE_TAG='v1.1.0-rc.2'
+readonly PACKAGE_VERSION='1.1.0~rc2'
+# GitHub rewrites '~' in uploaded asset names; keep the filename independent of
+# the Debian metadata version, which still needs '~' for prerelease ordering.
+readonly PACKAGE='rdpguard-proxy_1.1.0-rc.2_amd64.deb'
 readonly RELEASE_URL="https://github.com/tolabzik/RDP_GUARD/releases/download/${RELEASE_TAG}"
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }

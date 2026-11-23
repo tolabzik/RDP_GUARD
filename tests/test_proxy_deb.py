@@ -77,6 +77,19 @@ def test_wheel_version_preserves_debian_prerelease_ordering(tmp_path, version, e
     assert builder.wheel_version(application_wheel(tmp_path, version)) == expected
 
 
+@pytest.mark.parametrize("source,expected", [
+    ("1.1.0.dev1", "rdpguard-proxy_1.1.0-dev.1_amd64.deb"),
+    ("1.1.0rc2", "rdpguard-proxy_1.1.0-rc.2_amd64.deb"),
+    ("1.1.0", "rdpguard-proxy_1.1.0_amd64.deb"),
+])
+def test_download_name_survives_release_upload_without_changing_debian_version(tmp_path, source, expected):
+    version = builder.wheel_version(application_wheel(tmp_path, source))
+    assert builder.package_filename(version) == expected
+    assert re.fullmatch(r"[A-Za-z0-9_.-]+", expected)
+    if source != "1.1.0":
+        assert "~" in version  # Debian ordering remains separate from the asset name.
+
+
 @pytest.mark.parametrize("options", [
     {"name": "another-application"}, {"version": "1.1.0+unreviewed"},
     {"version": "1.1.0;unexpected"}, {"duplicate": True},

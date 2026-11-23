@@ -1,13 +1,13 @@
 # RDP Guard
 
-**Выпуск `1.1.0-rc.1` из `main`: Windows-защита и подключение nginx stream/NPM.**
+**Выпуск `1.1.0-rc.2` из `main`: Windows-защита и подключение nginx stream/NPM.**
 На Windows остаётся RDP Guard с локальной панелью; на Linux добавляется агент.
 Пользователи подключаются по прежнему адресу обычным RDP-клиентом. Linux и Windows
 связываются одним файлом `.rdpg`, без сохранения пароля root в панели.
 
-[Страница релиза](https://github.com/tolabzik/RDP_GUARD/releases/tag/v1.1.0-rc.1) ·
-[Windows x64 ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.1/RDPGuard-1.1.0-rc.1-win-x64.zip) ·
-[Linux Ubuntu 24.04 amd64 `.deb`](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.1/rdpguard-proxy_1.1.0~rc1_amd64.deb).
+[Страница релиза](https://github.com/tolabzik/RDP_GUARD/releases/tag/v1.1.0-rc.2) ·
+[Windows x64 ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/RDPGuard-1.1.0-rc.2-win-x64.zip) ·
+[Linux Ubuntu 24.04 amd64 `.deb`](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/rdpguard-proxy_1.1.0-rc.2_amd64.deb).
 Рядом с каждым пакетом опубликован `.sha256`; вход в GitHub для скачивания не нужен.
 
 **Интеграция прокси начинает работу в наблюдении. Автоматические баны на Linux
@@ -32,7 +32,7 @@
    с установленным `curl` выполните одну команду:
 
    ```bash
-   (set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.1/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
+   (set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
    ```
 
    Она скачает установщик конкретного релиза. Установщик проверит систему,
@@ -64,7 +64,7 @@
 
 Локальная защита RDP для Windows Server 2022: Windows Event Log → SQLite → проверяемые правила Windows Defender Firewall. Python 3.12+, две Windows-службы, веб-панель на **http://127.0.0.1:8787**.
 
-**Текущий выпуск: 1.1.0-rc.1, предварительный.** Начальный режим — **MONITOR ONLY**. Приёмка на целевой системе с RDS, Kaspersky Endpoint Security 14.2, SQL Server и 1С обязательна перед production ACTIVE. Репозиторий и CI не подключаются к рабочему серверу.
+**Текущий выпуск: 1.1.0-rc.2, предварительный.** Начальный режим — **MONITOR ONLY**. Приёмка на целевой системе с RDS, Kaspersky Endpoint Security 14.2, SQL Server и 1С обязательна перед production ACTIVE. Репозиторий и CI не подключаются к рабочему серверу.
 
 ![Панель RDP Guard с искусственными событиями проверки](docs/images/dashboard.jpg)
 

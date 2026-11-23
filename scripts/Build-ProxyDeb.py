@@ -31,6 +31,15 @@ def wheel_version(path):
         return version.replace('.dev', '~dev').replace('rc', '~rc')
 
 
+def package_filename(version):
+    # GitHub Releases rewrites '~' in uploaded asset names. Keep the Debian
+    # version inside control, but use a portable name for downloads/checksums.
+    if not re.fullmatch(r'\d+\.\d+\.\d+(?:~(?:dev|rc)\d+)?', version):
+        raise ValueError('Unsupported Debian package version')
+    portable_version = version.replace('~dev', '-dev.').replace('~rc', '-rc.')
+    return f'rdpguard-proxy_{portable_version}_amd64.deb'
+
+
 def stage_package(root, wheel, *, runner=subprocess.run, wheelhouse=None):
     version = wheel_version(wheel)
     library = root / 'usr/lib/rdpguard-proxy'
@@ -85,7 +94,7 @@ def main(argv=None):
     with tempfile.TemporaryDirectory(prefix='rdpguard-deb-') as temporary:
         stage = Path(temporary) / 'root'
         version = stage_package(stage, args.wheel.resolve(), wheelhouse=args.wheelhouse)
-        destination = args.output_dir / f'rdpguard-proxy_{version}_amd64.deb'
+        destination = args.output_dir / package_filename(version)
         if destination.exists():
             parser.error('Output already exists: ' + str(destination))
         subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(stage), str(destination)], check=True)

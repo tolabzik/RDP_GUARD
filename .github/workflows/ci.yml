@@ -71,12 +71,12 @@ jobs:
       - name: Build Ubuntu 24.04 amd64 package with bundled application dependencies
         run: |
           python -m pip wheel --no-deps --wheel-dir dist .
-          python scripts/Build-ProxyDeb.py --wheel dist/rdp_guard-1.1.0rc1-py3-none-any.whl --output-dir dist/deb
+          python scripts/Build-ProxyDeb.py --wheel dist/rdp_guard-1.1.0rc2-py3-none-any.whl --output-dir dist/deb
       - name: Test unattended install, upgrade and removal on disposable Ubuntu
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y python3.12 nftables iproute2 openssl ca-certificates
-          sudo "$(command -v python)" scripts/Test-ProxyDeb-Linux.py --run --deb dist/deb/rdpguard-proxy_1.1.0~rc1_amd64.deb
+          sudo "$(command -v python)" scripts/Test-ProxyDeb-Linux.py --run --deb dist/deb/rdpguard-proxy_1.1.0-rc.2_amd64.deb
       - name: Check setup discovery and reversible logging with disposable NPM
         run: |
           docker pull jc21/nginx-proxy-manager:2.17.1
@@ -109,7 +109,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $Version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.1.0-rc.1' }
+          $Version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.1.0-rc.2' }
           if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw 'Invalid release tag.' }
           "version=$Version" >> $env:GITHUB_OUTPUT
       - name: Build Windows x64 distribution
@@ -165,9 +165,16 @@ jobs:
           cd release
           sha256sum Install-ProxyRelease.sh > Install-ProxyRelease.sh.sha256
           sha256sum --check *.sha256
-      - name: Publish tested binaries and checksums
+      - name: Verify uploaded files before publishing release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" release/* --verify-tag --title "RDP Guard $RELEASE_TAG" --prerelease --notes-file docs/RELEASE_NOTES.md
+          gh release create "$RELEASE_TAG" release/* --verify-tag --draft --title "RDP Guard $RELEASE_TAG" --prerelease --notes-file docs/RELEASE_NOTES.md
+          (cd release && printf '%s\n' *) | LC_ALL=C sort > expected-assets.txt
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | LC_ALL=C sort > uploaded-assets.txt
+          diff -u expected-assets.txt uploaded-assets.txt
+          gh release download "$RELEASE_TAG" --dir verified-release
+          (cd verified-release && sha256sum --check *.sha256)
+          diff -qr release verified-release
+          gh release edit "$RELEASE_TAG" --draft=false

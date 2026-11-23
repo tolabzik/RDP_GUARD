@@ -1,4 +1,4 @@
-# RDP Guard 1.1.0-rc.1
+# RDP Guard 1.1.0-rc.2
 
 Предварительный выпуск из `main`: Windows-пакет и Linux-агент для nginx stream /
 Nginx Proxy Manager теперь устанавливаются готовыми пакетами и связываются одним
@@ -11,10 +11,10 @@ Nginx Proxy Manager теперь устанавливаются готовыми
 
 ## Файлы выпуска
 
-- `RDPGuard-1.1.0-rc.1-win-x64.zip` и `.sha256` — Windows-приложение, службы,
+- `RDPGuard-1.1.0-rc.2-win-x64.zip` и `.sha256` — Windows-приложение, службы,
   установщик, обновление и документация. Самостоятельно собирать EXE или ставить
   Python на Windows не требуется.
-- `rdpguard-proxy_1.1.0~rc1_amd64.deb` и `.sha256` — Ubuntu 24.04 amd64;
+- `rdpguard-proxy_1.1.0-rc.2_amd64.deb` и `.sha256` — Ubuntu 24.04 amd64;
   Python-библиотеки приложения включены в пакет.
 - `Install-ProxyRelease.sh` и `.sha256` — установщик именно этого выпуска. Проверяет систему,
   скачивает и проверяет пакет, устанавливает зависимости и открывает мастер.
@@ -38,7 +38,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Update.ps1"
 с установленным `curl` выполните одну команду:
 
 ```bash
-(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.1/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
+(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
 ```
 
 Мастер предлагает выбрать stream, адрес API и реальные IP администраторов,
@@ -49,6 +49,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Update.ps1"
 
 ## Что изменилось
 
+- Исправлена загрузка Linux-пакета из GitHub Release: имя файла теперь переносимое,
+  `rdpguard-proxy_1.1.0-rc.2_amd64.deb`, без символа `~`, который GitHub заменяет
+  при публикации. Ссылка установщика и имя в SHA256 совпадают с файлом выпуска.
+  Внутренняя версия Debian-пакета — `1.1.0~rc2`.
 - Linux сопоставляет Windows-события 131/140 с соединениями nginx и NAT, чтобы
   отделить реальный IP клиента от общего адреса прокси. Неоднозначные связи не
   становятся подтверждёнными клиентами.
