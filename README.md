@@ -7,6 +7,12 @@ Windows-компонент и отдельный Linux-агент остаютс
 По умолчанию агент только наблюдает; исполнение правил закрыто до нативной приёмки.
 Это не опубликованный релиз. [Установка, ограничения и план проверки агента](docs/PROXY_AGENT.md).
 
+Проверенные тестовые пакеты `1.1.0-dev.0` (код `84501f7`):
+[Windows x64](https://github.com/tolabzik/RDP_GUARD/actions/runs/45247600859/artifacts/14854618402)
+и [Linux-агент с установщиком](https://github.com/tolabzik/RDP_GUARD/actions/runs/45247600859/artifacts/14853548894).
+Это артефакты GitHub Actions, для скачивания нужен вход в GitHub; они не являются
+публикацией Releases. [Результаты тестов и границы проверки](docs/PROXY_TEST_REPORT.md).
+
 Локальная защита RDP для Windows Server 2022: Windows Event Log → SQLite → проверяемые правила Windows Defender Firewall. Python 3.12+, две Windows-службы, веб-панель на **http://127.0.0.1:8787**.
 
 **Текущий выпуск: 1.0.0-rc.8, предварительный.** Начальный режим — **MONITOR ONLY**. Приёмка на целевой системе с RDS, Kaspersky Endpoint Security 14.2, SQL Server и 1С обязательна перед production ACTIVE. Репозиторий и CI не подключаются к рабочему серверу.
