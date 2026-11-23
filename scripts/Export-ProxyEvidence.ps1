@@ -7,6 +7,8 @@ The requested interval is [StartUtc, EndUtc). Event 131 records from the lookbac
 interval are also retained so an event 140 can be associated with its connection.
 This script does not change services, auditing, firewall rules, or RDP settings.
 An incomplete export is retained, marked complete=false, and exits with code 2.
+Log retention is assessed separately in log_coverage; complete only describes
+the event query and conversion, not whether the requested history still exists.
 .EXAMPLE
 powershell.exe -NoProfile -File .\Export-ProxyEvidence.ps1 -StartUtc '2026-11-23T16:50:00Z' -EndUtc '2026-11-23T16:55:00Z' -OutputPath .\proxy-evidence.json
 #>
@@ -104,6 +106,112 @@ function ConvertFrom-ProxyEvidenceXml {
     }
 }
 
+function Get-ProxyLogSnapshot {
+    $snapshot = [ordered]@{
+        observed_at_utc = [DateTime]::UtcNow.ToString('o')
+        computer = [Environment]::MachineName
+        channel = $rdpGuardChannel
+        is_enabled = $null
+        log_mode = $null
+        maximum_size_bytes = $null
+        record_count = $null
+        oldest_record_number = $null
+        oldest = $null
+        newest = $null
+        errors = @()
+    }
+    $config = $null
+    try {
+        $config = Get-WinEvent -ListLog $rdpGuardChannel -ErrorAction Stop
+        $snapshot.is_enabled = [bool]$config.IsEnabled
+        $snapshot.log_mode = [string]$config.LogMode
+        $snapshot.maximum_size_bytes = $config.MaximumSizeInBytes
+        $snapshot.record_count = $config.RecordCount
+        $snapshot.oldest_record_number = $config.OldestRecordNumber
+    } catch {
+        $snapshot.errors += ('Log metadata: {0}: {1}' -f $_.FullyQualifiedErrorId, $_.Exception.Message)
+    } finally {
+        if ($config -is [System.IDisposable]) { $config.Dispose() }
+    }
+    foreach ($boundary in @('oldest', 'newest')) {
+        $record = $null
+        try {
+            $record = Get-WinEvent -LogName $rdpGuardChannel -Oldest:($boundary -eq 'oldest') -MaxEvents 1 -ErrorAction Stop
+            $native = [xml]$record.ToXml()
+            $nativeSystem = $native.Event.System
+            $timestamp = ConvertTo-ExplicitUtc ([string]$nativeSystem.TimeCreated.SystemTime) 'Boundary SystemTime'
+            $recordId = [long]$nativeSystem.EventRecordID
+            if ($recordId -lt 1 -or [string]$nativeSystem.Channel -ne $rdpGuardChannel -or
+                [string]::IsNullOrWhiteSpace([string]$nativeSystem.Computer)) {
+                throw 'Invalid native log boundary metadata.'
+            }
+            $snapshot[$boundary] = [ordered]@{
+                record_id = $recordId
+                timestamp_utc = $timestamp.UtcDateTime.ToString('o')
+                computer = [string]$nativeSystem.Computer
+            }
+        } catch {
+            $snapshot.errors += ('Log {0}: {1}: {2}' -f $boundary, $_.FullyQualifiedErrorId, $_.Exception.Message)
+        } finally {
+            if ($record -is [System.IDisposable]) { $record.Dispose() }
+        }
+    }
+    return [pscustomobject]$snapshot
+}
+
+function Get-ProxyLogCoverage {
+    param($Before, $After, [DateTimeOffset]$QueryStart)
+    $reasons = New-Object 'System.Collections.Generic.List[string]'
+    $unknown = $false
+    $insufficient = $false
+    foreach ($snapshot in @($Before, $After)) {
+        if ($snapshot.is_enabled -ne $true) {
+            $unknown = $true
+            $reasons.Add('The event channel is disabled or its enabled state could not be verified.')
+        }
+        if ($snapshot.errors.Count -gt 0 -or $null -eq $snapshot.oldest -or $null -eq $snapshot.newest) {
+            $unknown = $true
+            $reasons.Add('A log snapshot is empty or could not be read completely.')
+            continue
+        }
+        $oldestTime = ConvertTo-ExplicitUtc $snapshot.oldest.timestamp_utc 'Oldest SystemTime'
+        $newestTime = ConvertTo-ExplicitUtc $snapshot.newest.timestamp_utc 'Newest SystemTime'
+        if ($snapshot.oldest.record_id -gt $snapshot.newest.record_id -or $oldestTime -gt $newestTime -or
+            $snapshot.oldest.computer -ne $snapshot.newest.computer) {
+            $unknown = $true
+            $reasons.Add('Native log boundaries are inconsistent; the log may have reset or its clock changed.')
+        }
+        if ($oldestTime -gt $QueryStart) {
+            if ($snapshot.oldest.record_id -gt 1) {
+                $insufficient = $true
+                $reasons.Add('The oldest retained record is newer than query_start_utc; requested history may have been overwritten.')
+            } else {
+                $unknown = $true
+                $reasons.Add('The log begins after query_start_utc; earlier history cannot be verified.')
+            }
+        }
+    }
+    if ($null -ne $Before.oldest -and $null -ne $Before.newest -and
+        $null -ne $After.oldest -and $null -ne $After.newest) {
+        if ($After.oldest.record_id -lt $Before.oldest.record_id -or $After.newest.record_id -lt $Before.newest.record_id -or
+            $Before.oldest.computer -ne $After.oldest.computer -or
+            ($Before.oldest.record_id -eq $After.oldest.record_id -and $Before.oldest.timestamp_utc -ne $After.oldest.timestamp_utc) -or
+            ($Before.newest.record_id -eq $After.newest.record_id -and $Before.newest.timestamp_utc -ne $After.newest.timestamp_utc)) {
+            $unknown = $true
+            $reasons.Add('Log identity or record boundaries changed inconsistently during export.')
+        }
+    }
+    $status = 'retained'
+    if ($insufficient) { $status = 'insufficient' }
+    if ($unknown) { $status = 'unknown' }
+    return [ordered]@{
+        status = $status
+        reasons = @($reasons.ToArray() | Select-Object -Unique)
+        before = $Before
+        after = $After
+    }
+}
+
 $rdpGuardStart = ConvertTo-ExplicitUtc $StartUtc 'StartUtc'
 $rdpGuardEnd = ConvertTo-ExplicitUtc $EndUtc 'EndUtc'
 if ($rdpGuardEnd -le $rdpGuardStart -or ($rdpGuardEnd - $rdpGuardStart).TotalHours -gt 24) {
@@ -123,6 +231,7 @@ if (-not (Test-Path -LiteralPath $rdpGuardOutputDirectory -PathType Container)) 
 $rdpGuardErrors = New-Object 'System.Collections.Generic.List[string]'
 $rdpGuardEvents = New-Object 'System.Collections.Generic.List[object]'
 $rdpGuardRecords = @()
+$rdpGuardLogBefore = Get-ProxyLogSnapshot
 try {
     # Native query end is inclusive; the XML filter below enforces [start, end).
     $rdpGuardRecords = @(Get-WinEvent -FilterHashtable @{
@@ -136,6 +245,8 @@ try {
         $rdpGuardErrors.Add(('Event query failed: {0}: {1}' -f $_.FullyQualifiedErrorId, $_.Exception.Message))
     }
 }
+$rdpGuardLogAfter = Get-ProxyLogSnapshot
+$rdpGuardCoverage = Get-ProxyLogCoverage $rdpGuardLogBefore $rdpGuardLogAfter $rdpGuardQueryStart
 $rdpGuardTruncated = $rdpGuardRecords.Count -gt $MaxEvents
 if ($rdpGuardTruncated) {
     $rdpGuardErrors.Add("Native query exceeded MaxEvents=$MaxEvents; earlier records may be missing.")
@@ -164,6 +275,8 @@ foreach ($rdpGuardRecord in ($rdpGuardRecords | Select-Object -Skip $MaxEvents))
 $rdpGuardComplete = -not $rdpGuardTruncated -and $rdpGuardErrors.Count -eq 0
 $rdpGuardDocument = [ordered]@{
     schema = 'rdpguard.windows-proxy-evidence.v1'
+    computer = [Environment]::MachineName
+    log_coverage = $rdpGuardCoverage
     requested_start_utc = $rdpGuardStart.UtcDateTime.ToString('o')
     requested_end_utc = $rdpGuardEnd.UtcDateTime.ToString('o')
     query_start_utc = $rdpGuardQueryStart.UtcDateTime.ToString('o')
@@ -188,6 +301,9 @@ try { $rdpGuardFile.Write($rdpGuardBytes, 0, $rdpGuardBytes.Length) }
 finally { $rdpGuardFile.Dispose() }
 Write-Host ('Saved {0} events to {1}; complete={2}; truncated={3}' -f
     $rdpGuardEvents.Count, $rdpGuardOutput, $rdpGuardComplete, $rdpGuardTruncated)
+if ($rdpGuardCoverage.status -ne 'retained') {
+    Write-Warning ('Log coverage is {0}; an empty result does not prove that no connections occurred. See log_coverage in the JSON.' -f $rdpGuardCoverage.status)
+}
 if (-not $rdpGuardComplete) {
     Write-Warning 'Evidence is incomplete. Review errors in the JSON; do not infer absence of connections.'
     exit 2

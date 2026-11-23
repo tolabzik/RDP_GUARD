@@ -294,11 +294,61 @@ def read_windows(document: dict) -> tuple[list[dict], list[str]]:
     return events, sorted(set(issues))
 
 
+def windows_log_coverage(document: dict, events: list[dict]) -> dict:
+    """Validate retained boundaries separately from successful query execution."""
+    coverage = document.get("log_coverage")
+    if not isinstance(coverage, dict):
+        return {"status": "unknown", "reasons": ["missing_log_coverage_metadata"]}
+    claimed = coverage.get("status")
+    reasons = list(coverage.get("reasons") or [])
+    if claimed not in ("retained", "insufficient", "unknown"):
+        return {"status": "unknown", "reasons": ["invalid_log_coverage_status"]}
+    if claimed != "retained":
+        return {"status": claimed, "reasons": reasons or ["log_history_not_verified"]}
+    try:
+        query_start = instant(document["query_start_utc"])
+        requested_end = instant(document["requested_end_utc"])
+        snapshots = [coverage["before"], coverage["after"]]
+        hosts = set()
+        for snapshot in snapshots:
+            if (snapshot.get("is_enabled") is not True or snapshot.get("errors")
+                    or snapshot.get("channel") != CHANNEL):
+                raise ValueError("log_disabled_or_snapshot_unavailable")
+            if instant(snapshot["observed_at_utc"]) < requested_end:
+                raise ValueError("query_window_not_finished_at_log_snapshot")
+            oldest, newest = snapshot["oldest"], snapshot["newest"]
+            first, last = integer(oldest["record_id"], 1), integer(newest["record_id"], 1)
+            first_time, last_time = instant(oldest["timestamp_utc"]), instant(newest["timestamp_utc"])
+            host = oldest["computer"].rstrip(".").casefold()
+            if (not host or host != newest["computer"].rstrip(".").casefold()
+                    or first > last or first_time > last_time):
+                raise ValueError("inconsistent_log_boundaries")
+            hosts.add(host)
+            if first_time > query_start:
+                return {"status": "insufficient" if first > 1 else "unknown",
+                        "reasons": ["query_start_predates_retained_history"]}
+        if len(hosts) != 1 or any(event["computer"].rstrip(".").casefold() not in hosts for event in events):
+            raise ValueError("log_and_event_host_identity_mismatch")
+        before, after = snapshots
+        if instant(after["observed_at_utc"]) < instant(before["observed_at_utc"]):
+            raise ValueError("log_snapshot_order_conflict")
+        for boundary in ("oldest", "newest"):
+            previous, current = before[boundary], after[boundary]
+            if (current["record_id"] < previous["record_id"] or
+                    (current["record_id"] == previous["record_id"] and
+                     instant(current["timestamp_utc"]) != instant(previous["timestamp_utc"]))):
+                raise ValueError("log_reset_or_record_generation_changed")
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        return {"status": "unknown", "reasons": [str(exc)]}
+    return {"status": "retained", "reasons": reasons}
+
+
 def correlate_evidence(windows_export: dict, linux_records: list[dict]) -> dict:
     """Return observed candidates and explicit rejection reasons; never enforce."""
     capture, connections, nat, issues = read_linux(linux_records)
     events, windows_issues = read_windows(windows_export)
     issues.extend(windows_issues)
+    coverage = windows_log_coverage(windows_export, events)
     target = endpoint(capture["backend"])
     listener_port = integer(capture["listener"]["port"], 1, 65535)
     listener_ip = capture["listener"].get("ip")
@@ -327,6 +377,9 @@ def correlate_evidence(windows_export: dict, linux_records: list[dict]) -> dict:
         results.append(result)
         if issues:
             result["reason"] = "incomplete_or_invalid_capture"
+            continue
+        if coverage["status"] != "retained":
+            result["reason"] = "windows_log_coverage_" + coverage["status"]
             continue
         starts = activity_index[(failure["computer"].casefold(), failure["_activity"])]
         if len(starts) != 1:
@@ -391,11 +444,34 @@ def correlate_evidence(windows_export: dict, linux_records: list[dict]) -> dict:
                           nginx_connection={"capture_id": connection.key[0], "worker_pid": connection.key[1],
                                             "connection_id": connection.key[2], "lines": connection.lines},
                           nat_observation=observation["record"])
+    demonstrated = sum(result["status"] == "demonstrated_candidate" for result in results)
+    if issues:
+        assessment = {"status": "invalid_or_incomplete_evidence",
+                      "summary": "Capture integrity or validation issues prevent demonstrating a mapping."}
+    elif not results:
+        assessment = {"status": "insufficient_windows_evidence",
+                      "summary": "No native Windows credential-failure events were exported for this window; "
+                                 "the proxy-to-client mapping has not been demonstrated."}
+    elif coverage["status"] != "retained":
+        assessment = {"status": "insufficient_windows_evidence",
+                      "summary": "The native query completed, but retention of the requested Windows log "
+                                 "history was not verified. No candidate mapping is demonstrated."}
+    elif not demonstrated:
+        assessment = {"status": "mapping_not_demonstrated",
+                      "summary": "Windows failures are present, but none has a complete unambiguous evidence chain."}
+    elif demonstrated < len(results):
+        assessment = {"status": "partial_mapping_demonstrated",
+                      "summary": "Some observed failures have candidate mappings; unresolved failures remain. "
+                                 "These results do not authorize enforcement."}
+    else:
+        assessment = {"status": "mapping_demonstrated",
+                      "summary": "The supplied failures have observed candidate mappings. "
+                                 "These results do not authorize enforcement."}
     return {"schema": "rdpguard.proxy-shadow-report.v1", "shadow_only": True,
             "enforcement_supported": False, "capture_id": capture["capture_id"],
+            "assessment": assessment, "windows_log_coverage": coverage,
             "issues": sorted(set(issues)), "limitations": LIMITATIONS,
-            "counts": {"failures": len(results), "demonstrated_candidates": sum(
-                result["status"] == "demonstrated_candidate" for result in results)}, "results": results}
+            "counts": {"failures": len(results), "demonstrated_candidates": demonstrated}, "results": results}
 
 
 def main(argv=None):

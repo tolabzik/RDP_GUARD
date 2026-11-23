@@ -36,10 +36,25 @@ def ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def snapshot(oldest=1, newest=100, *, oldest_time="2000-11-23T16:00:00Z",
+             newest_time="2000-11-23T17:00:00Z", error=None, enabled=True):
+    return {
+        "oldest": event(131, oldest, oldest_time) if oldest is not None else None,
+        "newest": event(140, newest, newest_time) if newest is not None else None,
+        "oldest_record_number": oldest,
+        "error": error,
+        "enabled": enabled,
+    }
+
+
 def run_export(tmp_path, events=(), *, error=None, max_events=50, start="2000-11-23T16:54:28Z",
-               end="2000-11-23T16:54:30Z", existing=False):
+               end="2000-11-23T16:54:30Z", existing=False, snapshots=None):
     fixture = tmp_path / "fixture.json"
-    fixture.write_text(json.dumps({"events": list(events), "error": error}), encoding="utf-8")
+    fixture.write_text(json.dumps({
+        "events": list(events), "error": error,
+        "snapshots": snapshots if snapshots is not None else [snapshot(), snapshot()],
+        "snapshot_index": -1,
+    }), encoding="utf-8")
     output = tmp_path / "evidence.json"
     if existing:
         output.write_text("existing evidence", encoding="utf-8")
@@ -47,14 +62,33 @@ def run_export(tmp_path, events=(), *, error=None, max_events=50, start="2000-11
     harness.write_text(
         "$ErrorActionPreference = 'Stop'\n"
         f"$fixture = ConvertFrom-Json ([IO.File]::ReadAllText({ps_quote(fixture)}))\n"
+        "function New-TestRecord($xml) {\n"
+        "  $record = [pscustomobject]@{ Xml = $xml }\n"
+        "  $record | Add-Member -MemberType ScriptMethod -Name ToXml -Value { return $this.Xml }\n"
+        "  $record\n"
+        "}\n"
         "function Get-WinEvent {\n"
-        "  [CmdletBinding()] param([hashtable]$FilterHashtable, [int]$MaxEvents)\n"
+        "  [CmdletBinding()] param([hashtable]$FilterHashtable, [int]$MaxEvents, "
+        "[string]$ListLog, [string]$LogName, [switch]$Oldest)\n"
+        "  if ($ListLog) {\n"
+        "    $fixture.snapshot_index++\n"
+        "    $item = $fixture.snapshots[$fixture.snapshot_index]\n"
+        "    if ($item.error) { throw $item.error }\n"
+        "    return [pscustomobject]@{ IsEnabled=$item.enabled; LogMode='Circular'; MaximumSizeInBytes=1052672; "
+        "RecordCount=100; OldestRecordNumber=$item.oldest_record_number }\n"
+        "  }\n"
+        "  if ($LogName) {\n"
+        "    if ($MaxEvents -ne 1) { throw 'Boundary read must be bounded' }\n"
+        "    $item = $fixture.snapshots[$fixture.snapshot_index]\n"
+        "    if ($item.error) { throw $item.error }\n"
+        "    $xml = if ($Oldest) { $item.oldest } else { $item.newest }\n"
+        "    if (-not $xml) { Write-Error 'No matching events' -ErrorId NoMatchingEventsFound }\n"
+        "    return New-TestRecord $xml\n"
+        "  }\n"
         "  if ($fixture.error -eq 'empty') { Write-Error 'No matching events' -ErrorId NoMatchingEventsFound }\n"
         "  if ($fixture.error -eq 'denied') { throw 'Access denied' }\n"
         "  foreach ($xml in ($fixture.events | Select-Object -First $MaxEvents)) {\n"
-        "    $record = [pscustomobject]@{ Xml = $xml }\n"
-        "    $record | Add-Member -MemberType ScriptMethod -Name ToXml -Value { return $this.Xml }\n"
-        "    $record\n"
+        "    New-TestRecord $xml\n"
         "  }\n"
         "}\n"
         f"& {ps_quote(SCRIPT)} -OutputPath {ps_quote(output)} -StartUtc {ps_quote(start)} "
@@ -77,6 +111,12 @@ def test_export_preserves_native_evidence_and_distinguishes_lookback(tmp_path):
     assert not output.read_bytes().startswith(b"\xef\xbb\xbf")
     evidence = json.loads(output.read_text(encoding="utf-8"))
     assert evidence["complete"] is True and evidence["truncated"] is False
+    assert evidence["computer"]
+    coverage = evidence["log_coverage"]
+    assert coverage["status"] == "retained" and coverage["reasons"] == []
+    assert coverage["before"]["log_mode"] == "Circular"
+    assert coverage["before"]["maximum_size_bytes"] == 1052672
+    assert coverage["before"]["oldest"]["timestamp_utc"] == "2000-11-23T16:00:00.0000000Z"
     assert evidence["query_start_utc"] == "2000-11-23T16:54:23.0000000Z"
     assert evidence["event_count"] == 2
     first, second = evidence["events"]
@@ -157,3 +197,42 @@ def test_explicit_offset_is_normalized_to_utc(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     evidence = json.loads(output.read_text(encoding="utf-8"))
     assert evidence["requested_start_utc"] == "2000-11-23T16:54:28.0000000Z"
+
+
+def test_successful_empty_query_does_not_prove_history_was_retained(tmp_path):
+    rolled = snapshot(200, 300, oldest_time="2000-11-23T16:55:00Z")
+    result, output = run_export(tmp_path, error="empty", snapshots=[rolled, rolled])
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    assert evidence["complete"] is True and evidence["events"] == []
+    assert evidence["log_coverage"]["status"] == "insufficient"
+    assert "overwritten" in evidence["log_coverage"]["reasons"][0]
+
+
+def test_log_overwritten_during_query_is_detected_even_with_events(tmp_path):
+    before = snapshot(50, 100)
+    after = snapshot(101, 200, oldest_time="2000-11-23T16:54:24Z")
+    result, output = run_export(tmp_path, [event(140, 90, "2000-11-23T16:54:29Z")],
+                                snapshots=[before, after])
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    assert evidence["event_count"] == 1 and evidence["complete"] is True
+    assert evidence["log_coverage"]["status"] == "insufficient"
+
+
+@pytest.mark.parametrize("snapshots,reason", [
+    ([snapshot(50, 100), snapshot(1, 10)], "inconsistently"),
+    ([snapshot(), snapshot(newest_time="2000-11-23T17:00:01Z")], "inconsistently"),
+    ([snapshot(None, None), snapshot(None, None)], "empty"),
+    ([snapshot(error="Access denied"), snapshot()], "read completely"),
+    ([snapshot(), snapshot(enabled=False)], "disabled"),
+    ([snapshot(oldest_time="2000-11-23T16:55:00Z")] * 2, "begins after"),
+    ([snapshot(oldest_time="2000-11-23T18:00:00Z")] * 2, "inconsistent"),
+])
+def test_uncertain_log_coverage_is_explicit(tmp_path, snapshots, reason):
+    result, output = run_export(tmp_path, error="empty", snapshots=snapshots)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = json.loads(output.read_text(encoding="utf-8"))
+    assert evidence["complete"] is True
+    assert evidence["log_coverage"]["status"] == "unknown"
+    assert any(reason in item for item in evidence["log_coverage"]["reasons"])

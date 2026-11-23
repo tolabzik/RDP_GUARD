@@ -49,10 +49,16 @@ def nat(second=21, *, local_port=59034, wire_port=62000, identity=99, operation=
 
 
 def evidence():
+    boundary = {"observed_at_utc": timestamp(45), "computer": "TEST-WINDOWS", "channel": CHANNEL,
+                "is_enabled": True, "errors": [],
+                "oldest": {"record_id": 1, "timestamp_utc": timestamp(0), "computer": "TEST-WINDOWS"},
+                "newest": {"record_id": 200, "timestamp_utc": timestamp(40), "computer": "TEST-WINDOWS"}}
     windows = {
         "schema": WINDOWS_SCHEMA, "requested_start_utc": timestamp(10), "requested_end_utc": timestamp(40),
         "query_start_utc": timestamp(0), "exported_at_utc": timestamp(45), "max_events": 100,
-        "complete": True, "truncated": False, "errors": [], "events": [
+        "complete": True, "truncated": False, "errors": [],
+        "log_coverage": {"status": "retained", "reasons": [], "before": deepcopy(boundary),
+                         "after": deepcopy(boundary)}, "events": [
             native(131, 100, 21, data={"ConnType": "TCP", "ClientIP": "203.0.113.10:62000"}),
             native(140, 101, 22, data={"IPString": "203.0.113.10"}),
         ],
@@ -86,6 +92,75 @@ def test_exact_nat_port_translation_maps_to_original_client():
     assert candidate["nat_observation"]["original"]["sport"] == 59034
     assert report["shadow_only"] is True and report["enforcement_supported"] is False
     assert report["counts"] == {"failures": 1, "demonstrated_candidates": 1}
+    assert report["assessment"]["status"] == "mapping_demonstrated"
+
+
+@pytest.mark.parametrize("include_connection_only", [False, True])
+def test_valid_windows_export_without_failures_is_insufficient_not_a_success(include_connection_only):
+    windows, linux = evidence()
+    windows["events"] = windows["events"][:1] if include_connection_only else []
+    report = correlate_evidence(windows, linux)
+    assert report["issues"] == []  # An empty native query is valid, not corrupt evidence.
+    assert report["assessment"]["status"] == "insufficient_windows_evidence"
+    assert "has not been demonstrated" in report["assessment"]["summary"]
+    assert report["counts"] == {"failures": 0, "demonstrated_candidates": 0}
+    assert report["enforcement_supported"] is False
+
+
+def test_capture_integrity_takes_precedence_over_missing_windows_failures():
+    windows, linux = evidence()
+    windows["events"] = []
+    linux.insert(-1, record("gap", 25, reason="netlink_overrun"))
+    report = correlate_evidence(windows, linux)
+    assert report["assessment"]["status"] == "invalid_or_incomplete_evidence"
+    assert report["issues"]
+
+
+def test_present_but_unmapped_windows_failure_is_not_demonstrated():
+    windows, linux = evidence()
+    linux = [item for item in linux if item["kind"] != "conntrack"]
+    report = correlate_evidence(windows, linux)
+    assert report["assessment"]["status"] == "mapping_not_demonstrated"
+    assert report["counts"] == {"failures": 1, "demonstrated_candidates": 0}
+
+
+def test_partial_mapping_assessment_does_not_claim_all_failures_resolved():
+    windows, linux = evidence()
+    windows["events"].append(native(140, 102, 22, "{f4209a59-bee6-4230-a29c-04e0f6110000}",
+                                   {"IPString": "203.0.113.10"}))
+    report = correlate_evidence(windows, linux)
+    assert report["assessment"]["status"] == "partial_mapping_demonstrated"
+    assert report["counts"] == {"failures": 2, "demonstrated_candidates": 1}
+
+
+@pytest.mark.parametrize("change", ["missing", "overwritten", "disabled", "missing_boundary", "reset"])
+def test_successful_query_without_verified_retention_never_demonstrates_mapping(change):
+    windows, linux = evidence()
+    if change == "missing":
+        del windows["log_coverage"]
+    elif change == "overwritten":
+        windows["log_coverage"]["after"]["oldest"].update(record_id=50, timestamp_utc=timestamp(15))
+    elif change == "disabled":
+        windows["log_coverage"]["after"]["is_enabled"] = False
+    elif change == "missing_boundary":
+        windows["log_coverage"]["after"]["oldest"] = None
+    else:
+        windows["log_coverage"]["after"]["newest"]["record_id"] = 100
+    report = correlate_evidence(windows, linux)
+    assert report["issues"] == []
+    assert report["windows_log_coverage"]["status"] in ("unknown", "insufficient")
+    assert report["assessment"]["status"] == "insufficient_windows_evidence"
+    assert report["counts"] == {"failures": 1, "demonstrated_candidates": 0}
+
+
+def test_legacy_empty_export_is_insufficient_evidence_with_unknown_retention():
+    windows, linux = evidence()
+    windows["events"] = []
+    del windows["log_coverage"]
+    report = correlate_evidence(windows, linux)
+    assert report["assessment"]["status"] == "insufficient_windows_evidence"
+    assert report["windows_log_coverage"]["status"] == "unknown"
+    assert report["issues"] == [] and report["counts"]["demonstrated_candidates"] == 0
 
 
 def test_parallel_connections_are_not_matched_to_nearest_time():
