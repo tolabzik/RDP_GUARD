@@ -8,6 +8,7 @@ $DataRoot = Join-Path $env:ProgramData 'RDPGuard'
 $Payload = Join-Path $PSScriptRoot 'RDPGuard'
 if (-not (Test-Path (Join-Path $Payload 'rdpguard.exe'))) { throw 'Run Install.ps1 from the extracted release archive.' }
 if (Get-Service RDPGuardService -ErrorAction SilentlyContinue) { throw 'RDP Guard is already installed. Use Update.ps1.' }
+. (Join-Path $PSScriptRoot 'WatchdogTask.ps1')
 
 function Invoke-Sc([string[]]$Arguments) {
     & sc.exe @Arguments | Out-Host
@@ -58,13 +59,7 @@ try {
     $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($WebSid,'Modify','ContainerInherit,ObjectInherit','None','Allow')))
     Set-Acl $WebLogs $Acl
 
-    $Action = New-ScheduledTaskAction -Execute (Join-Path $InstallRoot 'rdpguard.exe') -Argument 'watchdog'
-    $EveryMinute = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
-    $Startup = New-ScheduledTaskTrigger -AtStartup
-    $Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    $Settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -StartWhenAvailable
-    Register-ScheduledTask -TaskName 'RDPGuardRollback' -Action $Action -Trigger @($EveryMinute,$Startup) -Principal $Principal -Settings $Settings -Force | Out-Null
-    Start-ScheduledTask -TaskName 'RDPGuardRollback'
+    Register-RdpGuardWatchdog -InstallRoot $InstallRoot
 
     if (-not $SkipAdminSetup) {
         $AdminName = Read-Host 'New panel administrator username (3-64 ASCII characters)'

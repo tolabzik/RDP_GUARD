@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-[CmdletBinding()] param([string]$Version = '1.0.0-rc.5')
+[CmdletBinding()] param([string]$Version = '1.0.0-rc.6')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw 'Invalid package version.' }
 Push-Location (Split-Path $PSScriptRoot -Parent)
@@ -13,7 +13,7 @@ try {
     $Staging = Join-Path 'dist' "RDPGuard-$Version-win-x64"
     New-Item -ItemType Directory $Staging -Force | Out-Null
     Copy-Item 'dist\RDPGuard' $Staging -Recurse -Force
-    Copy-Item 'scripts\Install.ps1','scripts\Update.ps1','scripts\Uninstall.ps1','scripts\Health.ps1','scripts\Emergency-Disable.ps1','README.md' $Staging
+    Copy-Item 'scripts\Install.ps1','scripts\Update.ps1','scripts\Uninstall.ps1','scripts\Health.ps1','scripts\Emergency-Disable.ps1','scripts\WatchdogTask.ps1','README.md' $Staging
     Copy-Item 'docs' $Staging -Recurse -Force
     python -m pip freeze | Set-Content (Join-Path $Staging 'DEPENDENCIES.txt') -Encoding UTF8
     $Archive = "$Staging.zip"

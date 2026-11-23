@@ -7,6 +7,7 @@ $DataRoot = Join-Path $env:ProgramData 'RDPGuard'
 $Payload = Join-Path $PSScriptRoot 'RDPGuard'
 if (-not (Test-Path (Join-Path $Payload 'rdpguard.exe'))) { throw 'Release payload is missing.' }
 if (-not (Get-Service RDPGuardService -ErrorAction SilentlyContinue)) { throw 'Use Install.ps1 for a new installation.' }
+. (Join-Path $PSScriptRoot 'WatchdogTask.ps1')
 & (Join-Path $InstallRoot 'rdpguard.exe') emergency-disable
 if ($LASTEXITCODE -ne 0) { throw 'Could not remove managed firewall rules. Update stopped.' }
 Stop-Service RDPGuardWeb -ErrorAction SilentlyContinue
@@ -20,6 +21,7 @@ try {
     # Replace the shared dependency tree so obsolete modules do not shadow the new version.
     Remove-Item (Join-Path $InstallRoot '_internal') -Recurse -Force
     Copy-Item (Join-Path $Payload '*') $InstallRoot -Recurse -Force
+    Register-RdpGuardWatchdog -InstallRoot $InstallRoot
     Start-Service RDPGuardService
     Start-Service RDPGuardWeb
     Write-Host "Updated. Protected backup: $Backup. Protection stays disabled until explicit reactivation."

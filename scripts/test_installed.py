@@ -15,6 +15,7 @@ import win32file
 import win32net
 import win32netcon
 import win32security
+import win32com.client
 import pywintypes
 from rdp_guard import __version__
 from rdp_guard.firewall import FirewallEngine, owned
@@ -52,6 +53,36 @@ def check_watchdog_preflight():
 
 check_watchdog_preflight()
 print("Installed scheduled watchdog and read-only CLI preflight passed.")
+
+# Read the actual registered definition and observe a timer-driven execution,
+# not only the one immediate invocation performed by the installer.
+scheduler = win32com.client.Dispatch("Schedule.Service")
+scheduler.Connect()
+task_folder = scheduler.GetFolder("\\")
+
+
+def check_watchdog_schedule():
+    task = task_folder.GetTask("RDPGuardRollback")
+    assert task.Definition.Principal.LogonType == 5  # TASK_LOGON_SERVICE_ACCOUNT, inferred from the SYSTEM SID.
+    triggers = list(task.Definition.Triggers)
+    assert len(triggers) == 2 and {trigger.Type for trigger in triggers} == {1, 8}
+    recurring = next(trigger for trigger in triggers if trigger.Type == 1)
+    assert recurring.Enabled and recurring.Repetition.Interval == "PT1M"
+    assert not recurring.Repetition.Duration and not recurring.EndBoundary
+    assert next(trigger for trigger in triggers if trigger.Type == 8).Enabled
+    return task.LastRunTime
+
+
+last_run = check_watchdog_schedule()
+wait_until = time.monotonic() + 90
+while time.monotonic() < wait_until:
+    task = task_folder.GetTask("RDPGuardRollback")
+    if task.LastRunTime > last_run and task.LastTaskResult == 0 and task.State != 4:
+        break
+    time.sleep(1)
+else:
+    raise AssertionError("The registered watchdog did not run again on its minute timer")
+print("Native watchdog has an unlimited minute trigger and a boot trigger; automatic repeat passed.")
 
 # A normal local user must not be able to bypass the web boundary through the pipe or database.
 username = "rdpg-ci-" + secrets.token_hex(3)
@@ -135,6 +166,11 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
     status = subprocess.run([cli, "status"], capture_output=True, text=True, timeout=20, check=True)
     assert json.loads(status.stdout)["mode"] == "MONITOR ONLY"
     print("100 concurrent dashboard RPC requests and subsequent CLI status passed.")
+    # State left by the Server 2012 R2 installation failure, after the user creates
+    # the panel account: provisioned services and data, stopped services, missing task.
+    subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                    "$ErrorActionPreference='Stop'; Stop-Service RDPGuardWeb; Stop-Service RDPGuardService; "
+                    "Unregister-ScheduledTask -TaskName RDPGuardRollback -Confirm:$false"], check=True, timeout=60)
     # Exercise the shipped update path on an existing database and real service processes.
     subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-File",
                     str(Path(__file__).with_name("Update.ps1"))], check=True, timeout=120)
@@ -160,6 +196,8 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
     assert list((Path(os.environ["ProgramData"]) / "RDPGuard").glob("backup-*/guard.db"))
     print("Update.ps1 preserved login, session, whitelist and backup; protection remains disabled.")
     check_watchdog_preflight()
+    check_watchdog_schedule()
+    print("Update.ps1 recovered the missing watchdog task and stopped services.")
     response = client.post("/api/rpc", headers=headers, json={"op": "activate", "args": {"confirmation": "ENABLE RDP GUARD", "backup_access": True}})
     assert response.status_code == 400, "RDP is not configured on 33345; activation must fail"
 
