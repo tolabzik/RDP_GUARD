@@ -195,8 +195,9 @@ def verify_document(document, computer, now):
 class Agent:
     """Durable decisions scoped to exactly one listener and one certificate."""
 
-    def __init__(self, config, capture, firewall=None, clock=time.time, database=None):
+    def __init__(self, config, capture, firewall=None, clock=time.time, database=None, monotonic=time.monotonic):
         self.config, self.capture, self.firewall, self.clock = config, capture, firewall, clock
+        self.monotonic = monotonic
         self.lock = threading.RLock()
         self.db = sqlite3.connect(database or config["state_file"], check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -215,6 +216,8 @@ class Agent:
         self.mode, self.last_evidence, self.error = "monitor", 0, ""
         self.activation_generation, self.activation_at = "observation", float("inf")
         self.applied_until = {}
+        self.applied_monotonic = {}
+        self.last_firewall_monotonic = float("-inf")
         self.capture_epoch, self.capture_healthy, self.checkpoint = "", False, None
         self.unresolved, self.last_firewall = 0, 0
 
@@ -364,7 +367,8 @@ class Agent:
                             remaining = True
                     if not remaining:
                         self.db.execute("DELETE FROM pending WHERE id=?", (row["id"],))
-            if self.firewall is not None and now - self.last_firewall >= 5:
+            if self.firewall is not None and (now - self.last_firewall >= 5 or now < self.last_firewall
+                                              or self.monotonic() - self.last_firewall_monotonic >= 5):
                 current = self.capture.snapshot()
                 if not current["healthy"] or current.get("epoch") != self.capture_epoch:
                     eligible = False
@@ -385,6 +389,9 @@ class Agent:
                 # convention is retained for the in-memory test adapter.
                 self.applied_until = (verified if verified is not None else
                                       {ip: apply_now + ttl for ip, ttl in bans.items() if ttl > 0})
+                finished_wall, finished_mono = self.clock(), self.monotonic()
+                self.applied_monotonic = {ip: finished_mono + min(30, max(0, until - finished_wall))
+                                          for ip, until in self.applied_until.items()}
                 self.db.execute("UPDATE decisions SET status='suspended' WHERE status IN ('blocked','pending')")
                 self.db.execute("UPDATE decisions SET status='removed' WHERE status='removal_pending'")
                 if self.applied_until:
@@ -392,6 +399,7 @@ class Agent:
                         self.db.execute("UPDATE decisions SET status='blocked' WHERE client_ip=? AND expires>?",
                                         (ip, apply_now))
                 self.last_firewall = apply_now
+                self.last_firewall_monotonic = finished_mono
             if not fresh and self.mode == "enforce":
                 self.error = "Windows evidence heartbeat is stale; new bans suspended"
 
@@ -408,7 +416,8 @@ class Agent:
                 "checkpoint_utc": self.checkpoint, "last_evidence_utc": utc(self.last_evidence) if self.last_evidence else None,
                 "matched": sum(counts.values()), "unresolved": self.unresolved,
                 "proposed": counts.get("proposed", 0),
-                "active_bans": sum(until > now for until in self.applied_until.values()),
+                "active_bans": sum(until > now and self.applied_monotonic.get(ip, 0) > self.monotonic()
+                                   for ip, until in self.applied_until.items()),
                 "error": self.error[:500], **{key: self.config[key] for key in ("stream_id", "backend_id", "computer")}}
 
     def results(self):
@@ -425,7 +434,7 @@ class Agent:
                    self.db.execute("SELECT client_ip,expires FROM bans WHERE expires>?", (now,))}
         for row in result:
             client = row["client_ip"]
-            if self.applied_until.get(client, 0) > now:
+            if self.applied_until.get(client, 0) > now and self.applied_monotonic.get(client, 0) > self.monotonic():
                 row["status"] = "blocked" if client in logical else "removal_pending"
                 row["expires"] = logical.get(client)
             elif client in logical:

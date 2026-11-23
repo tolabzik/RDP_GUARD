@@ -214,6 +214,21 @@ def test_state_scope_is_immutable(tmp_path):
         Agent(cfg, capture, clock=lambda: clock[0])
 
 
+def test_backwards_wall_clock_does_not_extend_reported_kernel_lease(tmp_path):
+    agent, envelope, clock, _, fw = setup_agent(tmp_path, enforce=True)
+    monotonic = [100.0]
+    agent.monotonic = lambda: monotonic[0]
+    agent.handle("/v1/evidence", envelope, "a" * 64)
+    agent.tick()
+    assert agent.status()["active_bans"] == 1
+    clock[0] -= 100
+    monotonic[0] += 31
+    assert agent.status()["active_bans"] == 0
+    assert agent.results()[0]["status"] == "suspended"
+    agent.tick()
+    assert fw.calls[-1] == {}
+
+
 def certificates(tmp_path):
     def openssl(*args):
         subprocess.run(["openssl", *map(str, args)], cwd=tmp_path, check=True, capture_output=True)
