@@ -7,7 +7,7 @@ import threading
 import time
 
 from . import __version__
-from .events import SECURITY, parse_event
+from .events import FAILURE_SOURCES, SECURITY, parse_event
 from .firewall import FirewallEngine, owned
 from .models import Settings, contains, network, overlaps
 
@@ -90,7 +90,15 @@ class Guard:
         def disposition(value):
             db.execute("UPDATE events SET disposition=? WHERE key=?", (value, event.key))
 
-        if event.event_id != 4625 or event.channel != SECURITY or event.ip is None:
+        if FAILURE_SOURCES.get(event.channel) != event.event_id:
+            return
+        if event.ip is None:
+            disposition("no-source-ip")
+            return
+        # A newly subscribed channel can replay years of records. Do not query live
+        # WTS sessions for each old failure or turn historical evidence into bans.
+        if not now - self.settings.window_seconds <= event.timestamp <= now + 5:
+            disposition("historical")
             return
         if self.trusted(event.ip):
             disposition("whitelisted")
@@ -112,21 +120,21 @@ class Guard:
         if not eligible:
             disposition("unconfirmed" if event.category == "Network-auth" else "ineligible")
             return
-        if not now - self.settings.window_seconds <= event.timestamp <= now + 5:
-            disposition("historical")
-            return
         if self.store.rows("SELECT id FROM blocks WHERE network=? AND ended IS NULL", (network(event.ip),)):
             disposition("existing-decision")
             return
         last_end = db.execute("SELECT MAX(ended) FROM blocks WHERE network=?", (network(event.ip),)).fetchone()[0]
         since = max(now - self.settings.window_seconds, last_end or 0)
         categories = ("RDP-confirmed", "Network-auth") if self.settings.include_network_auth else ("RDP-confirmed",)
+        # Security/4625 and RdpCoreTS/140 may describe the same failed connection.
+        # There is no reliable common ID: count each source independently rather
+        # than merge by timestamp or sum both toward a premature threshold.
         counts = db.execute(
-            "SELECT COUNT(*),MIN(timestamp),MAX(timestamp) FROM events WHERE ip=? AND event_id=4625 "
-            "AND channel='Security' AND timestamp>? AND timestamp<=? "
+            "SELECT COUNT(*),MIN(timestamp),MAX(timestamp) FROM events WHERE ip=? AND event_id=? "
+            "AND channel=? AND timestamp>? AND timestamp<=? "
             f"AND category IN ({','.join('?' for _ in categories)}) "
             "AND disposition NOT IN ('whitelisted','admin-protected','safety-unavailable','historical')",
-            (event.ip, since, now + 5, *categories),
+            (event.ip, event.event_id, event.channel, since, now + 5, *categories),
         ).fetchone()
         if counts[0] < self.settings.threshold:
             return
@@ -148,12 +156,14 @@ class Guard:
         db.execute(
             "INSERT INTO blocks(network,kind,reason,attempts,first_seen,last_seen,created,expires,status,strikes) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (network(event.ip), "dynamic", f"{event.category}: {counts[0]} failures", counts[0], counts[1], counts[2],
+            (network(event.ip), "dynamic", f"{event.category} / {event.channel} / {event.event_id}: {counts[0]} failures",
+             counts[0], counts[1], counts[2],
              now, now + duration, "pending" if active else "proposed", strikes),
         )
         disposition("pending" if active else "proposed")
         self.store.audit("detector", "block-decision" if active else "block-proposed",
-                         {"ip": event.ip, "attempts": counts[0], "seconds": duration}, now)
+                         {"ip": event.ip, "attempts": counts[0], "seconds": duration,
+                          "channel": event.channel, "event_id": event.event_id}, now)
 
     def _set_monitor(self, actor, action):
         # Persist inhibition before touching the firewall. Failed removal remains visible and retryable.
@@ -353,17 +363,23 @@ class Guard:
 
     def snapshot(self):
         now = self.clock()
+        failures = "(" + " OR ".join("(channel=? AND event_id=?)" for _ in FAILURE_SOURCES) + ")"
+        source_args = tuple(value for pair in FAILURE_SOURCES.items() for value in pair)
         counters = {}
         for label, seconds in (("hour", 3600), ("day", 86400), ("week", 604800), ("minute", 60)):
-            counters[label] = self.store.rows("SELECT COUNT(*) n,COUNT(DISTINCT ip) unique_ips FROM events "
-                                              "WHERE event_id=4625 AND ip IS NOT NULL AND timestamp>=?", (now - seconds,))[0]
+            counters[label] = self.store.rows(
+                "SELECT COUNT(*) n,COUNT(DISTINCT ip) unique_ips,COUNT(ip) with_ip FROM events WHERE "
+                + failures + " AND timestamp>=? AND timestamp<=?", (*source_args, now - seconds, now))[0]
         blocks = self.store.rows("SELECT status,COUNT(*) n FROM blocks WHERE ended IS NULL GROUP BY status")
-        histogram = self.store.rows("SELECT CAST(timestamp/300 AS INTEGER)*300 time,COUNT(*) count "
-                                    "FROM events WHERE event_id=4625 AND ip IS NOT NULL AND timestamp>=? GROUP BY 1 ORDER BY 1",
-                                    (now - 3600,))
+        histogram = self.store.rows(
+            "SELECT CAST(timestamp/300 AS INTEGER)*300 time,COUNT(*) count FROM events WHERE "
+            + failures + " AND timestamp>=? AND timestamp<=? GROUP BY 1 ORDER BY 1", (*source_args, now - 3600, now))
+        failure_sources = self.store.rows(
+            "SELECT channel,event_id,COUNT(*) n,COUNT(ip) with_ip FROM events WHERE "
+            + failures + " AND timestamp>=? AND timestamp<=? GROUP BY channel,event_id", (*source_args, now - 86400, now))
         return {"version": __version__, "mode": self.mode, "uptime": int(now - self.started), "now": now,
                 "os": platform.platform(), "platform": self.platform_status,
-                "counters": counters, "blocks": blocks, "histogram": histogram,
+                "counters": counters, "failure_sources": failure_sources, "blocks": blocks, "histogram": histogram,
                 "whitelist_count": self.store.rows("SELECT COUNT(*) n FROM whitelist")[0]["n"],
                 "last_error": self.last_error, "collectors": self.collectors,
                 "emergency_disabled": self.emergency_path.exists(),

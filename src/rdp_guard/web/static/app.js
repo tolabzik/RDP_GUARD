@@ -69,8 +69,8 @@ function addNetwork(kind, initial="") {
 function eventTable(events) {
   return table(["Время","Источник / пользователь","Категория","Причина","Обработка"],events.map(e => [fmt(e.timestamp),
     el("div",{},el("div",{class:"mono"},e.ip || "Без IP"),el("small",{class:"muted"},e.username || "—")),
-    el("div",{},badge(e.category,e.category === "RDP-confirmed" ? "good" : ""),el("div",{class:"muted"},`${e.event_id} · LogonType ${e.logon_type ?? "—"}`)),
-    el("div",{},e.reason,el("div",{class:"mono muted"},e.substatus || e.status)),badge(e.disposition,e.disposition === "admin-protected" ? "warn" : "") ]));
+    el("div",{},badge(e.category,e.category === "RDP-confirmed" ? "good" : ""),el("div",{class:"muted"},e.event_id === 140 ? "RdpCoreTS · 140" : `${e.event_id} · LogonType ${e.logon_type ?? "—"}`)),
+    el("div",{},e.reason,el("div",{class:"mono muted"},e.substatus || e.status)),badge(e.disposition === "no-source-ip" ? "Нет IP для блокировки" : e.disposition,["admin-protected","no-source-ip"].includes(e.disposition) ? "warn" : "") ]));
 }
 function graph(histogram, now) {
   const buckets = Array.from({length:12},(_,i)=>({time:Math.floor(now/300)*300-(11-i)*300,count:0}));
@@ -79,7 +79,7 @@ function graph(histogram, now) {
   const points = buckets.map((b,i)=>`${i*1000/11},${140-b.count/maximum*120}`).join(" ");
   const svg = document.createElementNS("http://www.w3.org/2000/svg","svg");
   svg.setAttribute("viewBox","0 0 1000 160"); svg.setAttribute("class","chart"); svg.setAttribute("preserveAspectRatio","none");
-  svg.setAttribute("role","img"); svg.setAttribute("aria-label",`Неудачные входы за час; максимум ${maximum} за 5 минут`);
+  svg.setAttribute("role","img"); svg.setAttribute("aria-label",`Записи об отказах за час; максимум ${maximum} за 5 минут`);
   const shape = (tag,attrs) => { const n=document.createElementNS(svg.namespaceURI,tag); for(const [k,v] of Object.entries(attrs)) n.setAttribute(k,v); svg.append(n); };
   for(const y of [20,60,100,140]) shape("line",{x1:0,x2:1000,y1:y,y2:y,class:"chart-grid"});
   shape("polygon",{points:`0,160 ${points} 1000,160`,class:"chart-fill"});
@@ -117,15 +117,17 @@ async function dashboard() {
     el("p",{},`Автоматический откат: ${fmt(s.lease.deadline)}`)),button("Подключение проверено",()=>confirmAction("Подтвердить подключение","После включения защиты закройте окно RDP на своём компьютере, не завершая сеанс Windows, и подключитесь снова с адреса из белого списка под Windows-администратором. Затем вернитесь сюда и нажмите «Подтвердить» до автоматического отката. Обновление страницы не считается переподключением.",()=>api("confirm-active")),"primary")));
   if(s.last_error) content.push(el("div",{class:"banner"},badge("ОШИБКА","bad"),s.last_error));
   content.push(el("div",{class:"toolbar"},badge(s.platform?.firewall ? "Windows Firewall · OK" : "Windows Firewall · требуется проверка",s.platform?.firewall ? "good" : "warn"),
-    badge(s.collectors.Security?.healthy ? "Event Log · подписка активна" : "Event Log · требуется проверка",s.collectors.Security?.healthy ? "good" : "warn")));
+    badge(s.collectors.Security?.healthy ? "Security · подписка активна" : "Security · требуется проверка",s.collectors.Security?.healthy ? "good" : "warn"),
+    badge(s.collectors["Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"]?.healthy ? "RdpCoreTS · подписка активна" : "RdpCoreTS · требуется проверка",s.collectors["Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"]?.healthy ? "good" : "warn")));
   const applied=s.blocks.find(b=>b.status==="applied")?.n || 0;
   content.push(el("div",{class:"cards"},[
-    ["Неудачных входов · 24 ч",number(s.counters.day.n),`${number(s.counters.hour.n)} за последний час`],
-    ["Уникальных IP · 24 ч",number(s.counters.day.unique_ips),`${number(s.counters.week.n)} событий за 7 дней`],
+    ["Записей об отказах · 24 ч",number(s.counters.day.n),`${number(s.counters.hour.n)} за час · ${number(s.counters.minute.n)} за последнюю минуту`],
+    ["Уникальных IP отказов · 24 ч",number(s.counters.day.unique_ips),`${number(s.counters.day.n-s.counters.day.with_ip)} записей без IP за сутки`],
     ["Применённых блокировок",number(applied),`${number(s.blocks.reduce((n,b)=>n+b.n,0))} действующих решений`],
-    ["Доверенных сетей",number(s.whitelist_count),`${number(s.counters.minute.n)} ошибок входа в минуту`]
+    ["Доверенных сетей",number(s.whitelist_count),"Адреса и сети из белого списка"]
   ].map(([label,value,hint])=>el("article",{class:"card"},el("div",{class:"label"},label),el("div",{class:"value"},value),el("div",{class:"hint"},hint)))));
-  content.push(panel("Неудачные входы за последний час",graph(s.histogram,s.now),[badge("Все категории")]));
+  content.push(panel("Записи об отказах за последний час",el("div",{},graph(s.histogram,s.now),
+    el("p",{class:"muted"},"Security 4625 и RdpCoreTS 140, включая записи без IP. Одна попытка может попасть в оба журнала. Порог блокировки считается отдельно по каждому журналу для одного IP.")),[badge("Все категории")]));
   content.push(panel("Последние события",eventTable(events.slice(0,8)),[button("Все события →",()=>selectView("events"))]));
   return content;
 }
@@ -133,8 +135,8 @@ async function eventsView() {
   const events=await api("events",{...filters,offset});
   const form=el("form",{class:"toolbar"});
   form.append(field("ip","IP","text",filters.ip || ""),field("username","Пользователь","text",filters.username || ""));
-  for(const [name,label,options] of [["category","Категория",["RDP-confirmed","Network-auth","RDP-context","Other"]],["disposition","Обработка",["observed","proposed","pending","unconfirmed","whitelisted","admin-protected","historical"]]]) {
-    const select=el("select",{name},el("option",{value:""},"Все"),options.map(o=>el("option",{value:o},o))); select.value=filters[name] || ""; form.append(el("label",{},label,select));
+  for(const [name,label,options] of [["category","Категория",["RDP-confirmed","Network-auth","RDP-context","Other"]],["disposition","Обработка",["observed","proposed","pending","unconfirmed","no-source-ip","whitelisted","admin-protected","historical"]]]) {
+    const select=el("select",{name},el("option",{value:""},"Все"),options.map(o=>el("option",{value:o},o === "no-source-ip" ? "Нет IP для блокировки" : o))); select.value=filters[name] || ""; form.append(el("label",{},label,select));
   }
   form.append(field("since","С","datetime-local",filters.since ? localTime(filters.since) : ""),field("until","По","datetime-local",filters.until ? localTime(filters.until) : ""));
   form.append(el("button",{type:"submit",class:"primary"},"Применить"));
@@ -175,7 +177,8 @@ async function settingsView() {
   for(const [key,label] of Object.entries(labels))form.append(field(key,label,"number",s[key],{required:"required"}));
   form.append(field("ban_seconds","Сроки блокировок, секунд через запятую","text",s.ban_seconds.join(", "),{required:"required"}));
   form.append(el("div",{class:"wide"},field("include_network_auth","Учитывать Network-auth / LogonType 3","checkbox","yes",{checked:s.include_network_auth}),
-    el("p",{class:"form-help"},"Тип 3 может относиться к SMB или другой службе. Включайте только после проверки доступных извне портов.")));
+    el("p",{class:"form-help"},"Тип 3 может относиться к SMB или другой службе. Включайте только после проверки доступных извне портов. Отказы RdpCoreTS 140 с IP учитываются автоматически и не требуют этой настройки.")));
+  form.append(el("p",{class:"wide muted"},"Порог применяется к одному IP за указанное окно, отдельно для Security 4625 и RdpCoreTS 140. Записи из двух журналов не суммируются для блокировки. Без IP адрес заблокировать невозможно."));
   form.append(el("p",{class:"wide muted"},"Порт здесь используется только для правил RDP Guard. Настройки RDP самой Windows не меняются. Для смены порта нужен режим Monitor Only и совпадение с Windows."),
     el("div",{class:"wide"},el("button",{type:"submit",class:"primary"},"Сохранить настройки")));
   form.onsubmit=async event=>{event.preventDefault();try{const data=new FormData(form),settings={...s};for(const key of Object.keys(labels))settings[key]=Number(data.get(key));settings.ban_seconds=data.get("ban_seconds").split(",").map(n=>Number(n.trim()));settings.include_network_auth=data.get("include_network_auth")==="yes";

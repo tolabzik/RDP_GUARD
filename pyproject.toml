@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rdp-guard"
-version = "1.0.0rc7"
+version = "1.0.0rc8"
 description = "Local Windows RDP authentication monitoring and scoped firewall protection"
 requires-python = ">=3.12"
 dependencies = [

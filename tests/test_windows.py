@@ -3,13 +3,15 @@ import os
 import sys
 
 import pytest
+from rdp_guard.windows.collector import QUERIES
 
 pytestmark = [pytest.mark.windows, pytest.mark.skipif(
     sys.platform != "win32" or os.environ.get("RDP_GUARD_NATIVE_TESTS") != "1",
     reason="Native firewall tests require an explicitly opted-in isolated Windows host")]
 
 
-def test_native_event_subscription_and_bookmark():
+@pytest.mark.parametrize("channel", QUERIES)
+def test_native_event_subscription_and_bookmark(channel):
     import win32event
     import win32evtlog
     signal = win32event.CreateEvent(None, False, False, None)
@@ -18,8 +20,8 @@ def test_native_event_subscription_and_bookmark():
     try:
         xml = win32evtlog.EvtRender(bookmark, win32evtlog.EvtRenderBookmark)
         assert "BookmarkList" in xml
-        subscription = win32evtlog.EvtSubscribe("Security", win32evtlog.EvtSubscribeToFutureEvents,
-            SignalEvent=signal, Query="*[System[EventID=4625]]")
+        subscription = win32evtlog.EvtSubscribe(channel, win32evtlog.EvtSubscribeToFutureEvents,
+            SignalEvent=signal, Query=QUERIES[channel])
         for event in win32evtlog.EvtNext(subscription, 1, 0, 0):
             event.Close()
     finally:

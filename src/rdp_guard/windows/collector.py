@@ -2,13 +2,14 @@ import logging
 import threading
 import time
 
-from ..events import LSM, RCM, SECURITY
+from ..events import LSM, RCM, RDP_CORE, SECURITY
 
 LOG = logging.getLogger(__name__)
 QUERIES = {
     SECURITY: "*[System[(EventID=4624 or EventID=4625 or EventID=4778)]]",
     RCM: "*[System[EventID=1149]]",
     LSM: "*[System[(EventID=21 or EventID=22 or EventID=23 or EventID=24 or EventID=25)]]",
+    RDP_CORE: "*[System[EventID=140]]",
 }
 
 

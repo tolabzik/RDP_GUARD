@@ -20,6 +20,7 @@ import pywintypes
 from rdp_guard import __version__
 from rdp_guard.firewall import FirewallEngine, owned
 from rdp_guard.windows.firewall import WindowsFirewall
+from rdp_guard.windows.collector import QUERIES
 
 if os.environ.get("GITHUB_ACTIONS") != "true":
     raise SystemExit("Only run this integration test in a disposable GitHub Actions runner")
@@ -36,6 +37,22 @@ for _ in range(45):
 else:
     raise RuntimeError(status.stderr)
 assert json.loads(status.stdout)["mode"] == "MONITOR ONLY"
+
+
+def check_installed_collectors():
+    for _ in range(30):
+        result = subprocess.run([cli, "status"], capture_output=True, text=True, timeout=20, check=True)
+        state = json.loads(result.stdout)
+        if all(state["collectors"].get(channel, {}).get("healthy") for channel in QUERIES):
+            assert len(state["collectors"]) == 4
+            assert "failure_sources" in state
+            return
+        time.sleep(1)
+    raise AssertionError("Installed event subscriptions failed: " + json.dumps(state["collectors"]))
+
+
+check_installed_collectors()
+print("All four installed event subscriptions, including RdpCoreTS/140, are healthy.")
 
 # Check the scheduler through the installed SYSTEM guard, not just a direct CLI watchdog call.
 def check_watchdog_preflight():
@@ -198,6 +215,7 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
     check_watchdog_preflight()
     check_watchdog_schedule()
     print("Update.ps1 recovered the missing watchdog task and stopped services.")
+    check_installed_collectors()
     response = client.post("/api/rpc", headers=headers, json={"op": "activate", "args": {"confirmation": "ENABLE RDP GUARD", "backup_access": True}})
     assert response.status_code == 400, "RDP is not configured on 33345; activation must fail"
 

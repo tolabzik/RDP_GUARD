@@ -34,6 +34,24 @@ Whitelist/blacklist импортируются JSON-массивами объе�
 
 ## Обновление
 
+### Отказы без IP и RdpCoreTS 140
+
+С rc.8 служба читает `Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational`, событие 140, независимо от Security. Этот источник помогает, когда 4625 содержит `IpAddress=-`, но Windows записывает IP в `IPString` события 140. Общую настройку Network-auth для него включать не требуется. После обновления проверьте из повышенной PowerShell:
+
+```powershell
+$rdpGuardHealth = & "$env:ProgramFiles\RDPGuard\rdpguard.exe" health | ConvertFrom-Json
+$rdpGuardHealth.collectors.'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational'
+$rdpGuardHealth.failure_sources | Format-Table channel,event_id,n,with_ip
+```
+
+Нужен `healthy: true` у новой подписки. `n` — записи об отказах за сутки, `with_ip` — сколько из них содержат пригодный адрес. Эти числа не обозначают достигнутый порог конкретного IP. В панели ищите **RDP-confirmed / RdpCoreTS 140** с адресом; у старых 4625 адрес сам по себе не появится.
+
+Если подписка неисправна, прочитайте её `error` и проверьте состояние канала через `Get-WinEvent -ListLog 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational'`. RDP Guard сам не включает журналы и не меняет аудит Windows. Если события 140 не создаются либо также не содержат адреса, IP-блокировка по ним невозможна.
+
+Порог по умолчанию — 10 подходящих отказов от одного IP за 300 секунд, отдельно по каждому источнику. Например, 9 событий Security и 9 RdpCoreTS не суммируются до 18. После порога создаётся одно решение для IP; whitelist и подтверждённые административные сессии имеют приоритет. Данные обзора — записи обоих журналов, включая отказы без IP; они могут отражать одну попытку дважды.
+
+### Порядок обновления
+
 1. Скачайте новый release и проверьте SHA-256.
 2. Запустите `Update.ps1` из нового архива в повышенной PowerShell.
 3. Скрипт вызывает независимое emergency-disable, останавливает службы, сохраняет SQLite и бинарники в защищённый `backup-YYYYMMDD-HHMMSS`, заменяет программу и запускает службы.
