@@ -13,7 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/Install-ProxyRelease.sh"
-PACKAGE = "rdpguard-proxy_1.1.0-rc.2_amd64.deb"
+PACKAGE = "rdpguard-proxy_1.1.0-rc.3_amd64.deb"
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ elif name == 'curl':
 elif name == 'sha256sum':
     print(hashlib.sha256(pathlib.Path(args[0]).read_bytes()).hexdigest(), ' ', args[0])
 elif name == 'dpkg-deb':
-    metadata = {'Package': 'rdpguard-proxy', 'Version': '1.1.0~rc2', 'Architecture': 'amd64'}
+    metadata = {'Package': 'rdpguard-proxy', 'Version': '1.1.0~rc3', 'Architecture': 'amd64'}
     metadata.update(json.loads(os.environ.get('PACKAGE_METADATA', '{}')))
     print(metadata[args[-1]])
 elif name == 'apt-get':
@@ -72,6 +72,7 @@ elif name == 'rdpguard-proxy':
     script = tmp_path / "installer.sh"
     script.write_text(SCRIPT.read_text().replace("/etc/os-release", str(os_release))
                       .replace("/etc/rdpguard-proxy/config.json", str(configuration))
+                      .replace("/etc/rdpguard-proxy/instances", str(tmp_path / "instances"))
                       .replace("/usr/bin/rdpguard-proxy", str(binaries / "rdpguard-proxy"))
                       .replace("/tmp/rdpguard-release.", str(tmp_path / "rdpguard-release.")))
 
@@ -114,7 +115,7 @@ def test_verified_release_installs_before_interactive_setup(installer):
         assert command[command.index("--proto") + 1] == "=https"
         assert "--fail" in command and "--tlsv1.2" in command
         url = next(value for value in command if value.startswith("https:"))
-        assert url.startswith("https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/")
+        assert url.startswith("https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/")
         asset = url.rsplit("/", 1)[1]
         assert asset in (PACKAGE, PACKAGE + ".sha256")
         assert re.fullmatch(r"[A-Za-z0-9_.-]+", asset)
@@ -186,3 +187,16 @@ def test_upgrade_preserves_existing_binding_and_does_not_restart_pairing(install
     assert not any(command[0] == "rdpguard-proxy" for command in commands)
     assert configuration.read_text() == '{"retained":true}'
     assert "existing proxy configuration was retained" in result.stdout
+
+
+def test_upgrade_of_named_only_install_does_not_start_pairing(installer):
+    run, _, _, configuration = installer
+    named = configuration.parent / 'instances/accounting/config.json'
+    named.parent.mkdir(parents=True)
+    named.write_text('{"retained":true}')
+    result, commands = run(INSTALLED_VERSION="1.1.0~rc2")
+    assert result.returncode == 0, result.stderr
+    assert any(command[:2] == ["apt-get", "install"] for command in commands)
+    assert not any(command[0] == "rdpguard-proxy" for command in commands)
+    assert named.read_text() == '{"retained":true}' and not configuration.exists()
+    assert 'add --instance NAME' in result.stdout

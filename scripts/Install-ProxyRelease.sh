@@ -4,11 +4,11 @@
 set -euo pipefail
 umask 077
 
-readonly RELEASE_TAG='v1.1.0-rc.2'
-readonly PACKAGE_VERSION='1.1.0~rc2'
+readonly RELEASE_TAG='v1.1.0-rc.3'
+readonly PACKAGE_VERSION='1.1.0~rc3'
 # GitHub rewrites '~' in uploaded asset names; keep the filename independent of
 # the Debian metadata version, which still needs '~' for prerelease ordering.
-readonly PACKAGE='rdpguard-proxy_1.1.0-rc.2_amd64.deb'
+readonly PACKAGE='rdpguard-proxy_1.1.0-rc.3_amd64.deb'
 readonly RELEASE_URL="https://github.com/tolabzik/RDP_GUARD/releases/download/${RELEASE_TAG}"
 
 fail() { printf '%s\n' "$*" >&2; exit 1; }
@@ -72,8 +72,8 @@ printf 'Verified %s. Installing system dependencies and package...\n' "$PACKAGE"
 apt-get update
 apt-get install -y -- "$rdp_release_dir/$PACKAGE"
 
-if [[ -f /etc/rdpguard-proxy/config.json ]]; then
-  printf 'Updated; existing proxy configuration was retained.\nRun sudo rdpguard-proxy doctor to check it.\n'
+if [[ -f /etc/rdpguard-proxy/config.json ]] || compgen -G '/etc/rdpguard-proxy/instances/*/config.json' >/dev/null; then
+  printf 'Updated; existing proxy configuration was retained.\nRun sudo rdpguard-proxy doctor to check it.\nTo add another Windows: sudo rdpguard-proxy add --instance NAME.\n'
 else
   printf 'Starting setup. Keep this terminal open while importing the .rdpg file on Windows.\n'
   /usr/bin/rdpguard-proxy setup
