@@ -158,14 +158,17 @@ def maintainer(tmp_path):
         pytest.skip("POSIX shell lifecycle checks")
     sandbox, binaries = tmp_path / "root", tmp_path / "bin"
     sandbox.mkdir()
+    (sandbox / 'run').mkdir()
     binaries.mkdir()
     log = tmp_path / "systemctl.calls"
     fake = binaries / "systemctl"
     fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$COMMAND_LOG"\n'
-                    'if [ "$1" = is-active ]; then exit "${SERVICE_ACTIVE:-1}"; fi\nexit 0\n')
+                    'if [ "$1" = is-active ]; then\n'
+                    ' if [ -n "$ACTIVE_UNITS" ]; then case ",$ACTIVE_UNITS," in *",$3,"*) exit 0;; *) exit 1;; esac; fi\n'
+                    ' exit "${SERVICE_ACTIVE:-1}"; fi\nexit 0\n')
     fake.chmod(0o755)
 
-    def run(name, action, *, active=False):
+    def run(name, action, *, active=False, active_units=''):
         source = (ROOT / "deploy/debian/DEBIAN" / name).read_text()
         # Every package-owned absolute location is redirected into this fixture.
         source = re.sub(r"/(?:run|etc|opt|var)/", lambda match: str(sandbox) + match[0], source)
@@ -173,7 +176,7 @@ def maintainer(tmp_path):
         path = tmp_path / name
         path.write_text(source)
         environment = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ.get("PATH", ""),
-                           COMMAND_LOG=str(log), SERVICE_ACTIVE="0" if active else "1")
+                           COMMAND_LOG=str(log), SERVICE_ACTIVE="0" if active else "1", ACTIVE_UNITS=active_units)
         result = subprocess.run([shutil.which("sh"), str(path), action], env=environment,
                                 capture_output=True, text=True, timeout=10)
         commands = log.read_text().splitlines() if log.exists() else []
@@ -255,3 +258,42 @@ def test_upgrade_with_missing_configuration_keeps_recovery_marker_and_does_not_s
     assert result.returncode != 0 and "refusing restart" in result.stderr
     assert marker.exists()
     assert commands == ["daemon-reload"]
+
+
+def test_upgrade_restores_only_the_running_named_instances(maintainer):
+    sandbox, run = maintainer
+    for name in ('accounting', 'standby'):
+        path = sandbox / 'etc/rdpguard-proxy/instances' / name / 'config.json'
+        path.parent.mkdir(parents=True)
+        path.write_text('{"customer":"unchanged"}')
+    result, commands = run('prerm', 'upgrade', active_units='rdpguard-proxy@accounting.service')
+    assert result.returncode == 0, result.stderr
+    assert 'stop rdpguard-proxy@accounting.service' in commands
+    assert 'stop rdpguard-proxy@standby.service' not in commands
+    result, commands = run('postinst', 'configure')
+    assert result.returncode == 0, result.stderr
+    assert 'start rdpguard-proxy@accounting.service' in commands
+    assert 'start rdpguard-proxy@standby.service' not in commands
+    assert 'start rdpguard-proxy.service' not in commands
+    assert not any(command.startswith('enable ') for command in commands)
+    assert not list((sandbox / 'run/rdpguard-proxy-package').iterdir())
+
+
+def test_removal_requires_detaching_named_logging_even_without_legacy_state(maintainer):
+    sandbox, run = maintainer
+    state = sandbox / 'var/lib/rdpguard-proxy/instances/accounting/setup-state.json'
+    state.parent.mkdir(parents=True)
+    state.write_text('{"logging_active":true}')
+    result, commands = run('prerm', 'remove')
+    assert result.returncode != 0 and '--instance NAME' in result.stderr
+    assert commands == []
+
+
+def test_package_upgrade_refuses_while_pairing_without_stopping_nodes(maintainer):
+    import fcntl
+    sandbox, run = maintainer
+    with (sandbox / 'run/rdpguard-proxy-management.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result, commands = run('prerm', 'upgrade', active=True)
+    assert result.returncode != 0 and 'setup is running' in result.stderr
+    assert commands == []

@@ -1,25 +1,50 @@
 #!/bin/sh
 set -eu
-case "$1" in
-    upgrade)
-        install -d -m 0700 /run/rdpguard-proxy-package
-        if systemctl is-active --quiet rdpguard-proxy.service; then
-            : > /run/rdpguard-proxy-package/was-running
-            chmod 0600 /run/rdpguard-proxy-package/was-running
-            systemctl stop rdpguard-proxy.service
-        else
-            rm -f /run/rdpguard-proxy-package/was-running
-        fi
-        ;;
-    remove)
-        if [ -f /var/lib/rdpguard-proxy/setup-state.json ]; then
-            if ! /usr/bin/python3.12 -c 'import json; from pathlib import Path; p=Path("/var/lib/rdpguard-proxy/setup-state.json"); raise SystemExit(1 if json.loads(p.read_text()).get("logging_active") else 0)'; then
-                echo 'Managed NPM INFO logging is active. Run sudo rdpguard-proxy unconfigure before removing the package.' >&2
-                exit 1
-            fi
-        fi
-        systemctl stop rdpguard-proxy.service rdpguard-proxy-logrotate.timer 2>/dev/null || true
-        systemctl disable rdpguard-proxy.service rdpguard-proxy-logrotate.timer 2>/dev/null || true
-        rm -f /run/rdpguard-proxy-package/was-running
-        ;;
-esac
+/usr/bin/python3.12 - "$1" <<'PY'
+import fcntl
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+if sys.argv[1] not in ('upgrade', 'remove'):
+    raise SystemExit(0)
+with open('/run/rdpguard-proxy-management.lock', 'a') as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit('RDP Guard setup is running; finish it before changing the package.')
+    root = Path('/etc/rdpguard-proxy')
+    markers = Path('/run/rdpguard-proxy-package')
+    units = [('rdpguard-proxy.service', 'was-running')]
+    for path in sorted((root / 'instances').glob('*/config.json')):
+        name = path.parent.name
+        if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', name) or name == 'default' or path.parent.is_symlink():
+            raise SystemExit('Invalid agent instance; refusing package operation.')
+        units.append(('rdpguard-proxy@' + name + '.service', 'instance-' + name))
+    units.append(('rdpguard-proxy-logrotate.timer', 'rotation-was-running'))
+    def systemctl(*args, check=True):
+        return subprocess.run(['systemctl', *args], check=check)
+    if sys.argv[1] == 'upgrade':
+        markers.mkdir(mode=0o700, parents=True, exist_ok=True)
+        markers.chmod(0o700)
+        for unit, marker in units:
+            path = markers / marker
+            if systemctl('is-active', '--quiet', unit, check=False).returncode == 0:
+                path.touch(mode=0o600)
+                systemctl('stop', unit)
+            else:
+                path.unlink(missing_ok=True)
+        systemctl('stop', 'rdpguard-proxy-logrotate.service')
+    else:
+        state = Path('/var/lib/rdpguard-proxy')
+        for path in [state / 'setup-state.json', *state.glob('instances/*/setup-state.json')]:
+            if path.exists() and json.loads(path.read_text()).get('logging_active'):
+                raise SystemExit('Managed NPM INFO logging is active. Run sudo rdpguard-proxy unconfigure --instance NAME for each node before removing the package.')
+        for unit, marker in units:
+            systemctl('stop', unit, check=False)
+            systemctl('disable', unit, check=False)
+            (markers / marker).unlink(missing_ok=True)
+        systemctl('stop', 'rdpguard-proxy-logrotate.service', check=False)
+PY

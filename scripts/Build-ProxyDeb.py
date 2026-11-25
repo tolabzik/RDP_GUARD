@@ -72,6 +72,7 @@ Description: RDP Guard nginx stream evidence agent (experimental)
     docs = root / 'usr/share/doc/rdpguard-proxy'
     docs.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ROOT / 'docs/PROXY_SETUP.md', docs / 'PROXY_SETUP.md')
+    shutil.copy2(ROOT / 'docs/PROXY_MULTI_INSTANCE.md', docs / 'PROXY_MULTI_INSTANCE.md')
     for file in (root / 'DEBIAN').iterdir():
         os.chmod(file, 0o755 if file.name != 'control' else 0o644)
     return version

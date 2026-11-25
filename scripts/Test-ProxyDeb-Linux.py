@@ -29,12 +29,17 @@ def run(args, check=True):
                           timeout=300, env=dict(os.environ, DEBIAN_FRONTEND='noninteractive'))
 
 
-def active():
-    return run(['systemctl', 'is-active', '--quiet', 'rdpguard-proxy.service'], False).returncode == 0
+def active(unit='rdpguard-proxy.service'):
+    return run(['systemctl', 'is-active', '--quiet', unit], False).returncode == 0
 
 
-def enabled():
-    return run(['systemctl', 'is-enabled', '--quiet', 'rdpguard-proxy.service'], False).returncode == 0
+def enabled(unit='rdpguard-proxy.service'):
+    return run(['systemctl', 'is-enabled', '--quiet', unit], False).returncode == 0
+
+
+def config_hashes():
+    return {str(path.relative_to(CONFIG)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in CONFIG.rglob('*') if path.is_file()}
 
 
 def expect(value, message):
@@ -83,25 +88,57 @@ def main(argv=None):
             owned = True
             (STATE / 'smoke-info.log').write_text('')
             (STATE / 'customer-sentinel').write_text('preserve this state')
-            before = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in CONFIG.iterdir()}
+            # Three independent scopes: legacy and named running, another named stopped.
+            # Test-only loopback certs can be reused here; setup tests check separate issuance.
+            used_ports = {api_port}
+            for name, listener_port in [('second', 45452), ('standby', 45453)]:
+                folder, state = CONFIG / 'instances' / name, STATE / 'instances' / name
+                shutil.copytree(root / 'bundle/linux', folder)
+                state.mkdir(parents=True, mode=0o700)
+                config = json.loads((folder / 'config.json').read_text())
+                with socket.socket() as sock:
+                    sock.bind(('127.0.0.1', 0))
+                    port = sock.getsockname()[1]
+                if port in used_ports:
+                    raise RuntimeError('CI ephemeral API ports collided')
+                used_ports.add(port)
+                config.update(api_port=port, stream_id=name, backend_id=name,
+                              listener_port=listener_port, backend_port=listener_port,
+                              state_file=str(state / 'state.sqlite3'))
+                for key, filename in [('ca_file', 'ca.pem'), ('cert_file', 'server.pem'), ('key_file', 'server.key')]:
+                    config[key] = str(folder / filename)
+                (folder / 'config.json').write_text(json.dumps(config))
+            before = config_hashes()
             run(['/usr/bin/rdpguard-proxy', '--config', CONFIG / 'config.json', '--check-config'])
             run(['dpkg', '-i', artifact])
             expect(not active() and not enabled(), 'stopped_disabled_upgrade_remains_stopped_disabled')
             run(['systemctl', 'enable', 'rdpguard-proxy.service'])
             run(['systemctl', 'start', 'rdpguard-proxy.service'])
+            run(['systemctl', 'start', 'rdpguard-proxy@second.service'])
+            run(['systemctl', 'enable', 'rdpguard-proxy@standby.service'])
             time.sleep(2)
             expect(active(), 'packaged_entrypoint_runs_from_private_libraries')
+            expect(active('rdpguard-proxy@second.service'), 'named_unit_starts_with_own_config_and_database')
             run(['dpkg', '-i', artifact])
             time.sleep(2)
             expect(active() and enabled(), 'running_enabled_upgrade_restores_only_previous_running_state')
-            after = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in CONFIG.iterdir()}
+            expect(active('rdpguard-proxy@second.service') and not enabled('rdpguard-proxy@second.service'),
+                   'running_disabled_named_unit_restarts_without_enabling')
+            expect(not active('rdpguard-proxy@standby.service') and enabled('rdpguard-proxy@standby.service'),
+                   'stopped_enabled_named_unit_is_not_started_by_upgrade')
+            expect((STATE / 'instances/second/state.sqlite3').is_file(), 'named_unit_uses_separate_database')
+            after = config_hashes()
             expect(before == after, 'upgrade_preserves_config_certificates_and_keys')
             expect((STATE / 'customer-sentinel').read_text() == 'preserve this state', 'upgrade_preserves_customer_state')
             run(['systemctl', 'stop', 'rdpguard-proxy.service'])
             run(['dpkg', '-i', artifact])
             expect(not active() and enabled(), 'stopped_enabled_upgrade_does_not_start_service')
+            expect(active('rdpguard-proxy@second.service'), 'legacy_stop_does_not_stop_named_unit')
             run(['apt-get', 'remove', '-y', 'rdpguard-proxy'])
             expect(not active() and CONFIG.is_dir() and (STATE / 'customer-sentinel').exists(), 'remove_stops_agent_preserves_customer_data')
+            expect(not active('rdpguard-proxy@second.service') and not enabled('rdpguard-proxy@standby.service'),
+                   'remove_stops_and_disables_named_units')
+            expect(before == config_hashes(), 'remove_preserves_all_instance_credentials')
             run(['apt-get', 'purge', '-y', 'rdpguard-proxy'])
             expect(CONFIG.is_dir() and (STATE / 'customer-sentinel').exists(), 'purge_preserves_customer_keys_and_state')
     except Exception as exc:
@@ -109,7 +146,8 @@ def main(argv=None):
         if isinstance(exc, subprocess.CalledProcessError):
             errors.append((exc.stdout or '')[-4000:] + (exc.stderr or '')[-4000:])
     finally:
-        run(['systemctl', 'stop', 'rdpguard-proxy.service', 'rdpguard-proxy-logrotate.timer'], False)
+        run(['systemctl', 'stop', 'rdpguard-proxy.service', 'rdpguard-proxy@second.service',
+             'rdpguard-proxy@standby.service', 'rdpguard-proxy-logrotate.timer'], False)
         run(['apt-get', 'purge', '-y', 'rdpguard-proxy'], False)
         if owned:
             shutil.rmtree(CONFIG)

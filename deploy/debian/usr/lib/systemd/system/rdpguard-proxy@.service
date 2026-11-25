@@ -1,0 +1,28 @@
+[Unit]
+Description=RDP Guard proxy agent for %i
+After=network.target docker.service
+Wants=rdpguard-proxy-logrotate.timer
+ConditionPathExists=/etc/rdpguard-proxy/instances/%i/config.json
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/rdpguard-proxy --config /etc/rdpguard-proxy/instances/%i/config.json
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+StateDirectory=rdpguard-proxy/instances/%i
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/rdpguard-proxy/instances/%i
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

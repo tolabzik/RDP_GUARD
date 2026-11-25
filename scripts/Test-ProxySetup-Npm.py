@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 ADDRESS = "192.0.2.45"
 LISTENER = 45451
 BACKEND = 45452
+SECOND_LISTENER = 45453
+SECOND_BACKEND = 45454
 
 
 def command(args, *, timeout=15, check=True):
@@ -48,8 +50,8 @@ def wait_ready(probe, seconds=90):
     raise RuntimeError(f"Disposable NPM did not become ready: {last}") from last
 
 
-def probe():
-    with socket.create_connection((ADDRESS, LISTENER), timeout=3) as connection:
+def probe(port=LISTENER):
+    with socket.create_connection((ADDRESS, port), timeout=3) as connection:
         payload = b"rdpguard-npm-setup-acceptance"
         connection.sendall(payload)
         if connection.recv(4096) != payload:
@@ -77,7 +79,8 @@ def main(argv=None):
         return 0
     if sys.platform != "linux" or os.geteuid() != 0 or not shutil.which("docker") or not shutil.which("ip"):
         parser.error("Use root on a disposable Linux CI host with Docker and iproute2")
-    from rdp_guard.proxy_setup import apply_info_logging, discover_streams, install_enrollment
+    from rdp_guard.proxy_setup import discover_streams, install_enrollment
+    from rdp_guard.proxy_instances import Instance, acquire_logging, release_logging, rotate_logs
     from rdp_guard.proxy_pairing import create_pairing
 
     # Refuse pre-existing topology instead of borrowing an interface or port.
@@ -87,7 +90,7 @@ def main(argv=None):
     suffix = uuid.uuid4().hex[:10]
     interface, container = "rgp" + suffix, "rdpguard-setup-" + suffix
     owned_interface = owned_container = False
-    server = None
+    servers = []
     checks, errors, image_id = [], [], ""
 
     def passed(name):
@@ -101,8 +104,10 @@ def main(argv=None):
             owned_interface = True
             command(["ip", "addr", "add", ADDRESS + "/32", "dev", interface])
             command(["ip", "link", "set", interface, "up"])
-            server = EchoServer((ADDRESS, BACKEND), Echo)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
+            for port in (BACKEND, SECOND_BACKEND):
+                server = EchoServer((ADDRESS, port), Echo)
+                servers.append(server)
+                threading.Thread(target=server.serve_forever, daemon=True).start()
             data, certificates = root / "data", root / "letsencrypt"
             data.mkdir(mode=0o755)
             certificates.mkdir(mode=0o755)
@@ -111,6 +116,7 @@ def main(argv=None):
                      "--label", "rdpguard.acceptance=" + suffix,
                      "-e", "DISABLE_IPV6=true", "-e", "IP_RANGES_FETCH_ENABLED=false", "-e", "TZ=UTC",
                      "-p", f"{ADDRESS}:{LISTENER}:{LISTENER}/tcp",
+                     "-p", f"{ADDRESS}:{SECOND_LISTENER}:{SECOND_LISTENER}/tcp",
                      "--mount", f"type=bind,source={data},target=/data",
                      "--mount", f"type=bind,source={certificates},target=/etc/letsencrypt", args.image], timeout=30)
             owned_container = True
@@ -137,6 +143,9 @@ server {{
 }}
 """
             stream_path.write_text(stream_text)
+            second_path = stream_path.with_name('987655.conf')
+            second_text = stream_text.replace(str(LISTENER), str(SECOND_LISTENER)).replace(str(BACKEND), str(SECOND_BACKEND))
+            second_path.write_text(second_text)
             include = data / "nginx" / "custom" / "server_stream_tcp.conf"
             include.parent.mkdir(exist_ok=True)
             original = b"# existing operator configuration must survive setup\n"
@@ -156,7 +165,9 @@ server {{
                     or (ADDRESS, LISTENER) not in stream.bindings):
                 raise RuntimeError("Docker port/mount/backend discovery differs from fixture")
             passed("setup_discovers_real_docker_stream_and_mount")
-            change = apply_info_logging(stream, root / "backup", runner=command)
+            item = Instance(root / 'installed-config', root / 'state')
+            item.state.mkdir(mode=0o700)
+            acquire_logging(item, stream, item.state / 'backup', command)
             if not include.read_bytes().startswith(original):
                 raise RuntimeError("Setup lost existing custom include content")
             if stream_path.read_text() != stream_text:
@@ -187,7 +198,19 @@ server {{
             create_pairing(pairing_directory, settings)
             installed = root / "installed-config"
             install_enrollment(dict(computer="TEST-WINDOWS", client_sha256="a" * 64),
-                               stream, plan, pairing_directory, destination=installed)
+                               stream, plan, pairing_directory, destination=installed, state_directory=item.state)
+            second = Instance(item.config_root, item.state_root, 'second')
+            second.state.mkdir(mode=0o700, parents=True)
+            second.config.parent.mkdir(mode=0o700, parents=True)
+            second_stream, = [s for s in streams if s.container_name.lstrip('/') == container
+                             and s.container_port == SECOND_LISTENER]
+            acquire_logging(second, second_stream, second.state / 'backup', command)
+            second_plan = dict(plan, stream_id='second', backend_id='second', api_port=9444)
+            install_enrollment(dict(computer='SECOND-WINDOWS', client_sha256='b' * 64),
+                               second_stream, second_plan, pairing_directory,
+                               destination=second.config, state_directory=second.state)
+            wait_ready(lambda: probe(SECOND_LISTENER), 15)
+            passed('two_nodes_share_logging_and_forward_independently')
             command(["logrotate", "--force", "--state", str(root / "rotation.state"),
                      str(installed / "logrotate.conf")])
             if not log.with_name(log.name + ".1").is_file():
@@ -201,8 +224,21 @@ server {{
             wait_ready(probe, 15)
             wait_ready(logged, 10)
             passed("generated_logrotate_reopens_only_owned_npm_log")
-            change.rollback()
-            if include.read_bytes() != original or stream_path.read_text() != stream_text:
+            before_detach = include.read_bytes()
+            if not release_logging(item, command) or include.read_bytes() != before_detach:
+                raise RuntimeError('Removing first node damaged shared logging')
+            wait_ready(lambda: probe(SECOND_LISTENER), 15)
+            rotation_calls = []
+            def rotate(args):
+                rotation_calls.append(args)
+                return command(args)
+            rotate_logs(item.config_root, item.state_root, rotate)
+            if len(rotation_calls) != 1 or rotation_calls[0][-1] != str(second.config / 'logrotate.conf'):
+                raise RuntimeError('Remaining node did not take over rotation exactly once')
+            passed('first_detach_keeps_second_node_and_shared_rotation')
+            if release_logging(second, command):
+                raise RuntimeError('Last node still has shared log owners')
+            if include.read_bytes() != original or stream_path.read_text() != stream_text or second_path.read_text() != second_text:
                 raise RuntimeError("Rollback did not restore original bytes")
             wait_ready(probe, 15)
             passed("rollback_restores_configuration_and_forwarding")
@@ -219,7 +255,7 @@ server {{
             output.mkdir(exist_ok=True)
             (output / "npm-fixture-diagnostics.json").write_text(json.dumps(diagnostics, indent=2) + "\n")
         finally:
-            if server is not None:
+            for server in servers:
                 server.shutdown()
                 server.server_close()
             if owned_container:

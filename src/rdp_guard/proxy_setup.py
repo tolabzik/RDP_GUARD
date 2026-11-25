@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from types import SimpleNamespace
 
 
 CONFIG = Path('/etc/rdpguard-proxy')
@@ -338,23 +337,27 @@ def choose_scope(stream, listener, available):
     return listener
 
 
-def local_status(runner=run_command):
+def local_status(runner=run_command, *, instance=None):
+    from .proxy_instances import Instance
+    item = Instance(CONFIG, STATE, instance)
     try:
-        return runner(['systemctl', 'status', '--no-pager', 'rdpguard-proxy.service'])
+        return runner(['systemctl', 'status', '--no-pager', item.unit])
     except SetupError as exc:
         return str(exc)
 
 
-def doctor(runner=run_command):
+def doctor(runner=run_command, *, instance=None):
     from .proxy_agent import load_config
-    result = {'configured': (CONFIG / 'config.json').is_file(), 'enforcement_allowed': False, 'checks': {}}
+    from .proxy_instances import Instance
+    item = Instance(CONFIG, STATE, instance)
+    result = {'configured': (item.config / 'config.json').is_file(), 'enforcement_allowed': False, 'checks': {}, 'instance': item.label, 'service': item.unit}
     if result['configured']:
-        config = load_config(json.loads(regular_read(CONFIG / 'config.json')))
+        config = load_config(json.loads(regular_read(item.config / 'config.json')))
         result['enforcement_allowed'] = config['enforcement_validated']
         result['checks']['configuration'] = True
         result['checks']['log_exists'] = Path(config['nginx_log']).is_file()
-    if (STATE / 'setup-state.json').exists():
-        result['setup'] = json.loads(regular_read(STATE / 'setup-state.json'))
+    if (item.state / 'setup-state.json').exists():
+        result['setup'] = json.loads(regular_read(item.state / 'setup-state.json'))
     try:
         streams = discover_streams(runner)
         result['checks']['npm_streams'] = len(streams)
@@ -375,55 +378,43 @@ def doctor(runner=run_command):
     return result
 
 
-def save_setup_state(**values):
-    path = STATE / 'setup-state.json'
+def save_setup_state(*, directory=None, **values):
+    path = (STATE if directory is None else directory) / 'setup-state.json'
     previous = json.loads(regular_read(path)) if path.exists() else {}
     atomic_write(path, json.dumps(dict(previous, schema='rdpguard.proxy-setup.v1', **values), indent=2).encode())
 
 
-def unconfigure(*, runner=run_command, input_fn=input, output=print):
-    """Restore only our unchanged INFO include; retain all credentials and data."""
+def unconfigure(*, runner=run_command, input_fn=input, output=print, instance=None):
+    """Detach this instance; only the last log user restores the managed include."""
+    from .proxy_instances import Instance, inventory, logging_backup, logging_users, release_logging
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise SetupError('Нужен root на Linux-хосте NPM')
-    state = json.loads(regular_read(STATE / 'setup-state.json'))
+    item = Instance(CONFIG, STATE, instance)
+    state = json.loads(regular_read(item.state / 'setup-state.json'))
     if state.get('logging_active') is not True:
         output('Managed INFO logging уже отключён. Ключи и данные сохранены.')
         return 0
-    backup = Path(state['backup_dir'])
-    if not backup.is_relative_to(STATE):
-        raise SetupError('Backup должен находиться в каталоге состояния агента')
-    metadata = json.loads(regular_read(backup / 'metadata.json'))
-    path = Path(metadata['path'])
-    original = regular_read(backup / 'server_stream_tcp.conf.original') if metadata['existed'] else None
-    if hashlib.sha256(original or b'').hexdigest() != metadata['sha256']:
-        raise SetupError('Контрольная сумма исходного include не совпадает')
-    applied = (original or b'') + (b'\n' if original and not original.endswith(b'\n') else b'') + BLOCK
+    _, _, path, original, applied, identity = logging_backup(item, state)
+    users = logging_users(item, path, exclude_self=True)
     current = regular_read(path) if path.exists() else None
-    already_restored = current == original
-    if not already_restored and current != applied:
-        raise SetupError('Include изменён после установки: автоматическое восстановление запрещено; сохранённый backup доступен')
-    identity = state['container_id']
-    if not re.fullmatch(r'[a-f0-9]{64}', identity):
-        raise SetupError('Некорректная identity контейнера')
+    if current != applied and (users or current != original):
+        raise SetupError('Include изменён после установки: автоматическое восстановление запрещено')
     runner(['docker', 'exec', identity, 'nginx', '-t'])
-    output(f'Будет восстановлен исходный {path}; служба и её ротация остановлены. Ключи и SQLite сохраняются.')
+    output(f'Будет остановлен узел {item.label}. Ключи и SQLite сохраняются. ' +
+           ('Общий INFO-журнал остаётся для других узлов.' if users else f'Будет восстановлен исходный {path}.'))
     if prompt('Подтвердите: ВОССТАНОВИТЬ', None, input_fn) != 'ВОССТАНОВИТЬ':
         return 0
-    runner(['systemctl', 'stop', 'rdpguard-proxy.service'])
-    if not already_restored:
-        IncludeChange(SimpleNamespace(container_id=identity), path, original, applied, runner,
-                      metadata.get('mode', 0o644), metadata.get('owner')).rollback()
-    else:
-        # Disk content alone does not prove nginx has loaded the restored file.
-        runner(['docker', 'exec', identity, 'nginx', '-s', 'reload'])
-    save_setup_state(logging_active=False, status='unconfigured')
-    runner(['systemctl', 'stop', 'rdpguard-proxy-logrotate.timer'])
-    runner(['systemctl', 'disable', 'rdpguard-proxy.service', 'rdpguard-proxy-logrotate.timer'])
-    output('INFO include восстановлен. Теперь пакет можно удалить; ключи и данные останутся.')
+    runner(['systemctl', 'stop', item.unit])
+    release_logging(item, runner)
+    runner(['systemctl', 'disable', item.unit])
+    if not any(state.get('logging_active') for _, _, state in inventory(CONFIG, STATE)):
+        runner(['systemctl', 'stop', 'rdpguard-proxy-logrotate.timer'])
+        runner(['systemctl', 'disable', 'rdpguard-proxy-logrotate.timer'])
+    output('Узел отключён; ключи и данные сохранены. Остальные узлы не остановлены.')
     return 0
 
 
-def install_enrollment(receipt, stream, plan, pairing_dir, *, destination=None):
+def install_enrollment(receipt, stream, plan, pairing_dir, *, destination=None, state_directory=None):
     """Commit all service credentials/config together; never copy the CA private key."""
     from .proxy_agent import load_config
     destination = CONFIG if destination is None else destination
@@ -437,7 +428,7 @@ def install_enrollment(receipt, stream, plan, pairing_dir, *, destination=None):
         'listener_ip': plan['listener_ip'], 'listener_port': stream.container_port,
         'relay_ips': plan['relay_ips'], 'nginx_utc_offset_minutes': stream.utc_offset_minutes,
         'nginx_pid_namespace': stream.namespace, 'whitelist': plan['whitelist'],
-        'state_file': str(STATE / 'state.sqlite3'), 'enforcement_validated': False, 'protocols': ['tcp'],
+        'state_file': str((state_directory or STATE) / 'state.sqlite3'), 'enforcement_validated': False, 'protocols': ['tcp'],
     })
     if destination.exists():
         existing = json.loads(regular_read(destination / 'config.json'))
@@ -472,19 +463,29 @@ def prompt(text, default=None, input_fn=input):
     return answer if answer else default
 
 
-def prepare_state_directory():
-    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if STATE.is_symlink() or STATE.stat().st_uid != 0:
+def prepare_state_directory(directory=None):
+    directory = STATE if directory is None else directory
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if any(path.is_symlink() for path in (directory, *directory.parents)) or directory.stat().st_uid != 0:
         raise SetupError('Каталог состояния должен принадлежать root и не быть ссылкой')
-    os.chmod(STATE, 0o700)
+    os.chmod(directory, 0o700)
 
 
-def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None):
+def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None, instance=None):
+    from .proxy_instances import (Instance, inventory, validate_available, next_api_port,
+                                  acquire_logging, release_logging)
+    item = Instance(CONFIG, STATE, instance)
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise SetupError('Запустите sudo rdpguard-proxy setup на Linux-хосте NPM')
-    if CONFIG.exists() or Path('/opt/rdpguard-proxy').exists() or (STATE / 'state.sqlite3').exists():
+    if item.config.exists() or Path('/opt/rdpguard-proxy').exists() or (item.state / 'state.sqlite3').exists():
         raise SetupError('Существующая установка обнаружена; для неё используйте status/doctor, не новую привязку')
     streams = discover_streams(runner)
+    configured = [cfg for _, cfg, _ in inventory(CONFIG, STATE) if cfg]
+    if instance is not None:
+        streams = [s for s in streams if not any((s.backend_ip, s.backend_port) ==
+                   (cfg['backend_ip'], cfg['backend_port']) for cfg in configured)]
+        if not streams:
+            raise SetupError('Все поддерживаемые streams уже привязаны; сначала добавьте новый stream в NPM')
     for number, stream in enumerate(streams, 1):
         output(f'{number}. {stream.container_name}: TCP {stream.container_port} → '
                f'{stream.backend_ip}:{stream.backend_port}'
@@ -500,7 +501,8 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
                                           input_fn), available)
     default_api = listener if ipaddress.ip_address(listener).is_global else None
     advertised = ipv4(prompt('IPv4 агента, доступный Windows по HTTPS', default_api, input_fn))
-    port_text = prompt('Отдельный HTTPS-порт агента', '9443', input_fn)
+    port_text = prompt('Отдельный HTTPS-порт агента', str(next_api_port(item, listener,
+                       [s.container_port for s in streams])), input_fn)
     if not port_text or not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
         raise SetupError('Неверный HTTPS-порт')
     api_port = int(port_text)
@@ -520,7 +522,11 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
     plan = dict(stream_id=f'npm-{stream.config_path.stem}-{stream.container_port}', backend_id=f'windows-{stream.container_port}',
                 listener_ip=listener, api_port=api_port, relay_ips=[relay], whitelist=whitelist,
                 agent_url=f'https://{advertised}:{api_port}', enable=enable)
-    destination = Path(pairing_file) if pairing_file else Path(f'/root/rdpguard-{stream.container_port}.rdpg')
+    if instance is not None:
+        plan['stream_id'] = instance
+        plan['backend_id'] = instance
+    validate_available(item, stream, listener, api_port, plan['stream_id'])
+    destination = Path(pairing_file) if pairing_file else Path(f'/root/rdpguard-{instance or stream.container_port}.rdpg')
     if not destination.is_absolute() or destination.exists() or destination.is_symlink():
         raise SetupError('Выберите новый абсолютный путь для единственного .rdpg файла')
     # Checking a port does not expose a server or send any remote packet.
@@ -538,9 +544,12 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
     if stream not in discover_streams(runner):
         raise SetupError('NPM scope изменился после просмотра плана; запустите мастер заново')
     prepare_state_directory()
-    work = Path(tempfile.mkdtemp(prefix='setup-', dir=STATE))
+    if instance is not None:
+        prepare_state_directory(item.state)
+        prepare_state_directory(item.config.parent)
+    work = Path(tempfile.mkdtemp(prefix='setup-', dir=item.state))
     pairing_dir = work / 'pairing'
-    change, authority, server, committed = None, None, None, False
+    authority, server, committed = None, None, False
     pairing_bytes = None
     from .proxy_pairing import create_pairing, PairingAuthority, make_pairing_server
     try:
@@ -551,14 +560,12 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
 
         def on_enrolled(receipt):
             nonlocal committed
-            install_enrollment(receipt, stream, plan, pairing_dir)
+            install_enrollment(receipt, stream, plan, pairing_dir, destination=item.config, state_directory=item.state)
             committed = True
 
         authority = PairingAuthority(document, pairing_dir, on_enrolled)
         server = make_pairing_server(authority, listener, api_port)
-        change = apply_info_logging(stream, work / 'nginx-backup', runner, before_change=lambda:
-            save_setup_state(logging_active=True, status='awaiting_windows', backup_dir=str(work / 'nginx-backup'),
-                             container_id=stream.container_id))
+        acquire_logging(item, stream, work / 'nginx-backup', runner)
         payload = json.dumps(document, ensure_ascii=True, indent=2).encode()
         with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as file:
             file.write(payload)
@@ -572,11 +579,11 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
             raise SetupError('Время привязки истекло. Новый запуск создаст новый одноразовый файл.')
         server.server_close()
         server = None
-        save_setup_state(status='paired' if authority.acknowledged else 'windows_confirmation_missing',
+        save_setup_state(directory=item.state, status='paired' if authority.acknowledged else 'windows_confirmation_missing',
                          windows_acknowledged=authority.acknowledged)
-        runner(['systemctl', 'start', 'rdpguard-proxy.service'])
+        runner(['systemctl', 'start', item.unit])
         if enable and authority.acknowledged:
-            runner(['systemctl', 'enable', 'rdpguard-proxy.service'])
+            runner(['systemctl', 'enable', item.unit])
         if not authority.acknowledged:
             output('Linux-привязка сохранена, но Windows не подтвердил сохранение сертификата. '
                    'Monitor запущен для уже сохранённого клиента; завершение настройки не подтверждено. '
@@ -595,29 +602,74 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
             destination.unlink()
         if pairing_dir.exists():
             shutil.rmtree(pairing_dir)
-        if not committed and change is not None:
-            change.rollback()
-            save_setup_state(logging_active=False, status='cancelled')
+        if not committed and (item.state / 'setup-state.json').exists():
+            state = json.loads(regular_read(item.state / 'setup-state.json'))
+            if state.get('logging_active'):
+                release_logging(item, runner)
+                save_setup_state(directory=item.state, logging_active=False, status='cancelled')
 
 
 def main(argv=None):
+    from .proxy_instances import inventory, instance_name, management_lock, rotate_logs
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     setup_parser = commands.add_parser('setup', help='Мастер новой установки и одноразовой привязки Windows')
     setup_parser.add_argument('--pairing-file', help='Новый абсолютный путь для .rdpg')
-    commands.add_parser('status', help='Состояние Linux службы')
-    commands.add_parser('doctor', help='Локальные проверки без изменений')
-    commands.add_parser('unconfigure', help='Восстановить исходный INFO include перед удалением пакета')
+    setup_parser.add_argument('--instance', help='Имя нового экземпляра')
+    add_parser = commands.add_parser('add', help='Добавить ещё один Windows, сохраняя существующие узлы')
+    add_parser.add_argument('--instance', help='Имя нового экземпляра')
+    add_parser.add_argument('--pairing-file', help='Новый абсолютный путь для .rdpg')
+    commands.add_parser('list', help='Список всех привязок без секретов')
+    commands.add_parser('rotate-logs', help='Общая ротация INFO-журналов (вызывается таймером)')
+    for command, help_text in (('status', 'Состояние служб'), ('doctor', 'Локальные проверки без изменений'),
+                               ('unconfigure', 'Отключить один узел, сохранив ключи и остальные узлы')):
+        child = commands.add_parser(command, help=help_text)
+        child.add_argument('--instance', help='Имя экземпляра; default для прежней одиночной установки')
     args = parser.parse_args(argv)
     try:
-        if args.command == 'setup':
-            return setup(pairing_file=args.pairing_file)
-        if args.command == 'unconfigure':
-            return unconfigure()
+        if sys.platform != 'linux' or os.geteuid() != 0:
+            raise SetupError('Нужен root на Linux-хосте NPM')
+        if args.command == 'rotate-logs':
+            # A ten-minute pairing must not suspend rotation for existing nodes.
+            # Config files are committed atomically and retained on unconfigure.
+            with management_lock(Path('/run/rdpguard-proxy-rotation.lock')):
+                rotate_logs(CONFIG, STATE, run_command)
+            return 0
+        if args.command in ('setup', 'add', 'unconfigure', 'rotate-logs'):
+            with management_lock():
+                entries = inventory(CONFIG, STATE)
+                if args.command == 'unconfigure':
+                    if args.instance is None and len(entries) > 1:
+                        raise SetupError('Укажите --instance ИМЯ (список: rdpguard-proxy list)')
+                    selected = (args.instance if args.instance != 'default' else None)
+                    if args.instance is None and len(entries) == 1:
+                        selected = entries[0][0].name
+                    return unconfigure(instance=selected)
+                selected = args.instance
+                if args.command == 'add' or (args.command == 'setup' and entries and selected is None):
+                    selected = selected or prompt('Имя нового узла', f'windows-{len(entries) + 1}')
+                    instance_name(selected)
+                return setup(pairing_file=args.pairing_file, instance=selected)
+        entries = inventory(CONFIG, STATE)
+        if args.command == 'list':
+            rows = []
+            for item, config, state in entries:
+                rows.append({'instance': item.label, 'service': item.unit, 'status': state.get('status', 'manual'),
+                             'computer': config['computer'] if config else None,
+                             'listener': f"{config['listener_ip']}:{config['listener_port']}" if config else None,
+                             'api_port': config['api_port'] if config else None,
+                             'enforcement_allowed': config['enforcement_validated'] if config else False})
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return 0
+        selected = getattr(args, 'instance', None)
+        names = ([None if selected == 'default' else instance_name(selected)] if selected is not None else
+                 [item.name for item, _, _ in entries] or [None])
         if args.command == 'status':
-            print(local_status())
+            for name in names:
+                print(local_status(instance=name))
         else:
-            print(json.dumps(doctor(), ensure_ascii=False, indent=2))
+            results = [doctor(instance=name) for name in names]
+            print(json.dumps(results[0] if len(results) == 1 else results, ensure_ascii=False, indent=2))
         return 0
     except (SetupError, OSError, ValueError, subprocess.SubprocessError, KeyboardInterrupt) as exc:
         print('Настройка не завершена: ' + str(exc), file=sys.stderr)
