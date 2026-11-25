@@ -193,15 +193,22 @@ def test_enrollment_commit_is_monitor_only_idempotent_and_excludes_ca_key(tmp_pa
         setup.install_enrollment(dict(receipt, client_sha256='b' * 64), stream, plan, pairing, destination=destination)
 
 
-def wizard(tmp_path, monkeypatch, *, acknowledge=True, enroll=True, confirm=True):
+def wizard(tmp_path, monkeypatch, *, acknowledge=True, enroll=True, confirm=True, existing=None, instance=None,
+           expected_api_port=None):
     from rdp_guard import proxy_pairing
-    data, _, calls, base = fixture(tmp_path, monkeypatch)
+    if existing is None:
+        data, document, calls, base = fixture(tmp_path, monkeypatch)
+    else:
+        data, document, calls, base = existing.data, existing.document, existing.calls, existing.base
+        (data / 'nginx/stream/2.conf').write_text(TEMPLATE.replace('45451', '45452').replace('192.0.2.20', '192.0.2.21'))
+        document['NetworkSettings']['Ports']['45452/tcp'] = [{'HostIp': '0.0.0.0', 'HostPort': '45452'}]
     config, state = tmp_path / 'config', tmp_path / 'state'
     monkeypatch.setattr(setup, 'CONFIG', config)
     monkeypatch.setattr(setup, 'STATE', state)
     monkeypatch.setattr(setup.sys, 'platform', 'linux')
     monkeypatch.setattr(setup.os, 'geteuid', lambda: 0)
-    monkeypatch.setattr(setup, 'prepare_state_directory', lambda: state.mkdir(mode=0o700))
+    monkeypatch.setattr(setup, 'prepare_state_directory', lambda directory=None:
+                        (directory or state).mkdir(mode=0o700, parents=True, exist_ok=True))
     monkeypatch.setattr(setup.socket, 'socket', lambda *_: SimpleNamespace(
         __enter__=lambda self: self, __exit__=lambda *args: None))
 
@@ -213,7 +220,7 @@ def wizard(tmp_path, monkeypatch, *, acknowledge=True, enroll=True, confirm=True
             pass
 
         def bind(self, endpoint):
-            assert endpoint == ('192.0.2.10', 9443)
+            assert endpoint == ('192.0.2.10', expected_api_port or (9444 if existing else 9443))
 
     monkeypatch.setattr(setup.socket, 'socket', lambda *_: Probe())
     clock, observed = {'now': 0}, []
@@ -260,13 +267,14 @@ def wizard(tmp_path, monkeypatch, *, acknowledge=True, enroll=True, confirm=True
         return base(args)
 
     answers = iter(['1', '', '192.0.2.10', '', '', '198.51.100.7/32', 'да', 'ПРИМЕНИТЬ' if confirm else 'нет'])
-    output, pairing = [], tmp_path / 'windows.rdpg'
+    output, pairing = [], tmp_path / ((instance or 'windows') + '.rdpg')
 
     def execute():
-        return setup.setup(runner=runner, input_fn=lambda _: next(answers), output=output.append, pairing_file=pairing)
+        return setup.setup(runner=runner, input_fn=lambda _: next(answers), output=output.append,
+                           pairing_file=pairing, instance=instance)
 
     return SimpleNamespace(execute=execute, config=config, state=state, calls=calls, output=output,
-                           pairing=pairing, server=server, data=data, runner=runner)
+                           pairing=pairing, server=server, data=data, runner=runner, document=document, base=base)
 
 
 def test_wizard_waits_for_durable_windows_ack_before_start(tmp_path, monkeypatch):
@@ -276,6 +284,7 @@ def test_wizard_waits_for_durable_windows_ack_before_start(tmp_path, monkeypatch
     state = json.loads((test.state / 'setup-state.json').read_text())
     assert state['status'] == 'paired' and state['windows_acknowledged']
     assert ['systemctl', 'enable', 'rdpguard-proxy.service'] in test.calls
+    assert ['systemctl', 'enable', '--now', 'rdpguard-proxy-logrotate.timer'] in test.calls
     assert not test.pairing.exists() and not list(test.state.rglob('ca.key'))
     assert json.loads((test.config / 'config.json').read_text())['enforcement_validated'] is False
 
@@ -287,6 +296,7 @@ def test_expired_issued_receipt_is_not_claimed_as_completed_pairing(tmp_path, mo
     assert state['status'] == 'windows_confirmation_missing' and not state['windows_acknowledged']
     assert ['systemctl', 'start', 'rdpguard-proxy.service'] in test.calls
     assert ['systemctl', 'enable', 'rdpguard-proxy.service'] not in test.calls
+    assert ['systemctl', 'enable', '--now', 'rdpguard-proxy-logrotate.timer'] in test.calls
     assert any('не подтверждено' in line for line in test.output)
     assert not test.pairing.exists() and not list(test.state.rglob('ca.key'))
 

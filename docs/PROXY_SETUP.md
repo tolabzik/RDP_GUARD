@@ -1,15 +1,19 @@
 # Установка Linux-агента и подключение Windows
 
-Выпуск **1.1.0-rc.2**, пакет для **Ubuntu 24.04 amd64** с уже работающим
+Начиная с `1.1.0-rc.3`, один Linux-пакет обслуживает несколько Windows через
+отдельные экземпляры служб. [Добавление второго узла](PROXY_MULTI_INSTANCE.md).
+
+Выпуск **1.1.0-rc.3**, пакет для **Ubuntu 24.04 amd64** с уже работающим
 Nginx Proxy Manager в Docker. Пакет содержит приложение и его Python-библиотеки;
 `apt` устанавливает системные зависимости. Вручную создавать venv или запускать
 pip на сервере не требуется. Начальный режим интеграции — наблюдение;
-автоблокировки на Linux в этом выпуске закрыты до целевой приёмки.
+новые привязки получают `enforcement_validated=false` до проверки их схемы.
+Обновление сохраняет уже установленное разрешение блокировок для существующих узлов.
 
 ## 1. Подготовить Windows
 
-Скачайте [Windows ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/RDPGuard-1.1.0-rc.2-win-x64.zip)
-и [его SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/RDPGuard-1.1.0-rc.2-win-x64.zip.sha256).
+Скачайте [Windows ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/RDPGuard-1.1.0-rc.3-win-x64.zip)
+и [его SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/RDPGuard-1.1.0-rc.3-win-x64.zip.sha256).
 Проверьте хеш командой `Get-FileHash` и распакуйте ZIP полностью.
 Из распакованной папки в PowerShell администратора:
 
@@ -34,7 +38,7 @@ Server 2012 R2 пока не подтверждён.
 `curl`, доступ к GitHub и репозиториям Ubuntu, root либо права `sudo`:
 
 ```bash
-(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
+(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
 ```
 
 Установщик конкретного релиза скачивает `.deb` и `.sha256`, сверяет SHA256,
@@ -42,18 +46,18 @@ Server 2012 R2 пока не подтверждён.
 Он сохраняет интерактивный ввод: не запускайте установщик через `curl | bash`.
 При существующей конфигурации выполняется обновление без повторной привязки.
 
-Для ручной установки скачайте [.deb](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/rdpguard-proxy_1.1.0-rc.2_amd64.deb)
-и [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.2/rdpguard-proxy_1.1.0-rc.2_amd64.deb.sha256)
+Для ручной установки скачайте [.deb](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/rdpguard-proxy_1.1.0-rc.3_amd64.deb)
+и [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/rdpguard-proxy_1.1.0-rc.3_amd64.deb.sha256)
 в один каталог, затем:
 
 ```sh
-sha256sum -c rdpguard-proxy_1.1.0-rc.2_amd64.deb.sha256 && \
-  sudo apt install ./rdpguard-proxy_1.1.0-rc.2_amd64.deb && \
+sha256sum -c rdpguard-proxy_1.1.0-rc.3_amd64.deb.sha256 && \
+  sudo apt install ./rdpguard-proxy_1.1.0-rc.3_amd64.deb && \
   sudo rdpguard-proxy setup
 ```
 
 Переходите к установке только при результате `OK` проверки SHA256. Имя файла
-содержит `1.1.0-rc.2`; внутри Debian-пакета версия записана как `1.1.0~rc2`
+содержит `1.1.0-rc.3`; внутри Debian-пакета версия записана как `1.1.0~rc3`
 для правильного порядка обновлений в `apt`.
 
 ## 3. Пройти мастер и импортировать файл
@@ -77,7 +81,7 @@ Nginx Proxy Manager в Docker. Ручную установку в `/opt/rdpguard
 
 Мастер сначала читает контейнеры и stream-конфигурации. Затем предлагает выбрать
 stream, конкретный IP входа и реальные адреса администраторов, показывает все
-изменения и просит одно подтверждение. Поддерживается один IPv4 TCP stream с
+изменения и просит одно подтверждение. Каждый экземпляр обслуживает один IPv4 TCP stream с
 конкретным IPv4 backend; TLS-терминация, изменённый внешний порт Docker,
 неизвестные include и несколько replicas не принимаются. UDP и IPv6 остаются
 вне выбранной области защиты.
@@ -110,7 +114,7 @@ stream-файлы не редактируются. Include действует н
 мастера; переданную копию также следует удалить после импорта.
 
 Для наблюдения Windows ACTIVE не требуется. Адреса администраторов в Linux
-whitelist независимы от Windows whitelist. В этой сборке Linux gate остаётся
+whitelist независимы от Windows whitelist. У новой привязки Linux gate равен
 `enforcement_validated=false`: сама привязка не включает блокировки.
 
 `rdpguard-proxy status` показывает состояние службы; `rdpguard-proxy doctor`
@@ -122,17 +126,19 @@ PID namespace закреплён за выбранным контейнером.
 агента. Ротация тоже закреплена за полным ID контейнера; при его замене нужно
 проверить и обновить её цель. До восстановления наблюдения блокировки недоступны.
 
-При обновлении пакета конфигурация, ключи и SQLite сохраняются. Работавшая служба
-останавливается на время замены и запускается вновь; остановленная служба не
-запускается, состояние автозапуска сохраняется. Перед удалением выполните:
+При обновлении пакета конфигурация, ключи и SQLite сохраняются. Ранее работавшие службы
+останавливаются на время замены и запускаются вновь; остановленные экземпляры не
+запускаются, состояние автозапуска сохраняется. Для прежнего узла перед удалением выполните:
 
 ```sh
-sudo rdpguard-proxy unconfigure
+sudo rdpguard-proxy unconfigure --instance default
 sudo apt remove rdpguard-proxy
 ```
 
-`unconfigure` показывает и восстанавливает только исходный INFO include, если
-его байты не менялись после установки, и останавливает службу с ротацией.
+Если узлов несколько, сначала отключите каждый через `unconfigure --instance ИМЯ`
+(имена показывает `rdpguard-proxy list`). Общий include и ротация сохраняются, пока
+они нужны другим узлам. Последний узел восстанавливает исходный INFO include,
+если его байты не менялись после установки, и отключает ротацию.
 Если include редактировали вручную, восстановление останавливается; backup и
 его путь сохраняются в `/var/lib/rdpguard-proxy/setup-state.json`. Нужно вручную
 сверить исходный файл с текущим, убрать managed INFO block, выполнить `nginx -t`

@@ -267,13 +267,22 @@ def acceptance(lab):
     lab.expect("other_destination_port_remains_allowed", True, port=OTHER_PORT)
     lab.expect("trusted_client_remains_allowed", True, TRUSTED_CLIENT)
     lab.expect("tcp_only_policy_does_not_block_udp", True, protocol="udp")
+    # A second independent agent can ban the same source on another stream.
+    second_config = replace(config, stream_id=config.stream_id + '-second', listener_port=OTHER_PORT)
+    second_firewall = lab.firewall(second_config)
+    assert_applied_clients(second_firewall.sync([ProxyBan(CLIENT, time.time() + 30)], mode="enforce"), {CLIENT})
+    lab.expect("second_instance_blocks_its_own_stream", False, port=OTHER_PORT)
     firewall.sync([], mode="enforce")
     lab.expect("manual_full_state_unblock", True)
+    lab.expect("first_instance_unblock_does_not_unblock_second", False, port=OTHER_PORT)
     firewall.remove(mode="enforce")
     if ("inet", config.table_name) in lab.tables() or ("ip", NAT_TABLE) not in lab.tables():
         raise AcceptanceError("Owned removal affected the wrong table")
     lab.pass_check("remove_keeps_separate_dnat_table")
     lab.expect("traffic_after_owned_table_removal", True)
+    lab.expect("first_instance_removal_does_not_remove_second", False, port=OTHER_PORT)
+    second_firewall.remove(mode="enforce")
+    lab.expect("second_instance_removal_restores_its_stream", True, port=OTHER_PORT)
 
     # Reconfigure only after explicitly removing the old owned scope.
     config = replace(config, protocols=("tcp", "udp"))

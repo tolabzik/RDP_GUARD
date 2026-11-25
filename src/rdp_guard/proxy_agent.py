@@ -542,11 +542,11 @@ def make_server(agent):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in {"setup", "status", "doctor", "unconfigure"}:
+    if argv and argv[0] in {"setup", "add", "list", "status", "doctor", "unconfigure", "rotate-logs"}:
         from .proxy_setup import main as setup_main
         return setup_main(argv)
     parser = argparse.ArgumentParser(description=__doc__,
-        epilog="Setup commands: rdpguard-proxy setup | status | doctor | unconfigure")
+        epilog="Management: rdpguard-proxy setup | add | list | status | doctor | unconfigure")
     parser.add_argument("--config", required=True)
     parser.add_argument("--check-config", action="store_true")
     args = parser.parse_args(argv)

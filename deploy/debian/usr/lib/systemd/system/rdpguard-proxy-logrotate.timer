@@ -1,6 +1,6 @@
 [Unit]
 Description=Bound RDP Guard nginx evidence log retention
-ConditionPathExists=/etc/rdpguard-proxy/logrotate.conf
+ConditionPathIsDirectory=/etc/rdpguard-proxy
 
 [Timer]
 OnBootSec=5min

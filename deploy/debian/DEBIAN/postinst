@@ -1,16 +1,36 @@
 #!/bin/sh
 set -eu
-case "$1" in
-    configure|abort-upgrade)
-        systemctl daemon-reload 2>/dev/null || true
-        if [ -f /run/rdpguard-proxy-package/was-running ]; then
-            if [ ! -f /etc/rdpguard-proxy/config.json ]; then
-                echo 'Previous running service has no configuration; refusing restart.' >&2
-                exit 1
-            fi
-            systemctl start rdpguard-proxy.service
-            rm -f /run/rdpguard-proxy-package/was-running
-        fi
-        ;;
-esac
+/usr/bin/python3.12 - "$1" <<'PY'
+import fcntl
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+if sys.argv[1] not in ('configure', 'abort-upgrade'):
+    raise SystemExit(0)
+with open('/run/rdpguard-proxy-management.lock', 'a') as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit('RDP Guard setup is running; finish it and retry package configuration.')
+    subprocess.run(['systemctl', 'daemon-reload'], check=False)
+    root = Path('/etc/rdpguard-proxy')
+    markers = Path('/run/rdpguard-proxy-package')
+    units = [('rdpguard-proxy.service', markers / 'was-running', root / 'config.json')]
+    for marker in sorted(markers.glob('instance-*')):
+        name = marker.name[len('instance-'):]
+        if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', name) or name == 'default':
+            raise SystemExit('Invalid recovery marker; refusing restart.')
+        units.append(('rdpguard-proxy@' + name + '.service', marker, root / 'instances' / name / 'config.json'))
+    units.append(('rdpguard-proxy-logrotate.timer', markers / 'rotation-was-running', None))
+    # Validate every pending restart before starting any node; retain markers on failure.
+    for unit, marker, config in units:
+        if marker.exists() and config is not None and not config.is_file():
+            raise SystemExit('Previous running service has no configuration; refusing restart: ' + unit)
+    for unit, marker, _ in units:
+        if marker.exists():
+            subprocess.run(['systemctl', 'start', unit], check=True)
+            marker.unlink()
+PY
 # New installs are deliberately neither started nor enabled.
