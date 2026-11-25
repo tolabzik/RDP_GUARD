@@ -90,8 +90,10 @@ def validate_available(item, stream, listener, api_port, stream_id):
             raise SetupError('Этот входной IP/порт уже защищается узлом ' + other.label)
         if (cfg['backend_ip'], cfg['backend_port']) == (stream.backend_ip, stream.backend_port):
             raise SetupError('Этот backend уже привязан к узлу ' + other.label)
-        if (cfg['api_host'], cfg['api_port']) == (listener, api_port):
+        if cfg['api_host'] in (listener, '0.0.0.0') and cfg['api_port'] in (api_port, stream.container_port):
             raise SetupError('HTTPS-порт уже закреплён за узлом ' + other.label)
+        if (cfg['listener_ip'], cfg['listener_port']) == (listener, api_port):
+            raise SetupError('Порт API занят RDP stream узла ' + other.label)
 
 
 def next_api_port(item, listener, reserved_ports=()):

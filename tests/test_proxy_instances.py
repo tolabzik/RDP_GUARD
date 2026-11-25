@@ -100,7 +100,7 @@ def test_conflicting_rotation_is_rejected_before_any_logrotate(tmp_path, monkeyp
     assert calls == []
 
 
-@pytest.mark.parametrize('collision', ['listener', 'backend', 'api', 'stream'])
+@pytest.mark.parametrize('collision', ['listener', 'backend', 'api', 'stream', 'api_on_rdp', 'rdp_on_api'])
 def test_duplicate_scopes_are_rejected_before_pairing(tmp_path, monkeypatch, collision):
     first, second, _ = nodes(tmp_path, monkeypatch)
     item = instances.Instance(first.config, first.state, 'third')
@@ -112,6 +112,10 @@ def test_duplicate_scopes_are_rejected_before_pairing(tmp_path, monkeypatch, col
         stream = replace(stream, backend_ip='192.0.2.20')
     elif collision == 'api':
         api_port = 9443
+    elif collision == 'api_on_rdp':
+        api_port = 45451
+    elif collision == 'rdp_on_api':
+        stream = replace(stream, container_port=9443)
     else:
         stream_id = 'accounting'
     with pytest.raises(setup.SetupError):
@@ -172,3 +176,15 @@ def test_adding_node_refuses_modified_shared_include_without_stopping_first(tmp_
     assert include.read_bytes() == changed
     assert not any(call[0] == 'systemctl' or 'reload' in call for call in second.calls[before:])
     assert not (first.config / 'instances/accounting/config.json').exists()
+
+
+def test_api_default_skips_existing_rdp_stream_even_without_a_listening_socket(tmp_path, monkeypatch):
+    first = wizard(tmp_path, monkeypatch)
+    source = first.data / 'nginx/stream/1.conf'
+    source.write_text(source.read_text().replace('45451', '9444'))
+    first.document['NetworkSettings']['Ports'] = {'9444/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '9444'}]}
+    first.execute()
+    second = wizard(tmp_path, monkeypatch, existing=first, instance='accounting', expected_api_port=9445)
+    second.execute()
+    config = json.loads((first.config / 'instances/accounting/config.json').read_text())
+    assert config['api_port'] == 9445

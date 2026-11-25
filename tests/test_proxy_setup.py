@@ -193,7 +193,8 @@ def test_enrollment_commit_is_monitor_only_idempotent_and_excludes_ca_key(tmp_pa
         setup.install_enrollment(dict(receipt, client_sha256='b' * 64), stream, plan, pairing, destination=destination)
 
 
-def wizard(tmp_path, monkeypatch, *, acknowledge=True, enroll=True, confirm=True, existing=None, instance=None):
+def wizard(tmp_path, monkeypatch, *, acknowledge=True, enroll=True, confirm=True, existing=None, instance=None,
+           expected_api_port=None):
     from rdp_guard import proxy_pairing
     if existing is None:
         data, document, calls, base = fixture(tmp_path, monkeypatch)
@@ -219,7 +220,7 @@ def wizard(tmp_path, monkeypatch, *, acknowledge=True, enroll=True, confirm=True
             pass
 
         def bind(self, endpoint):
-            assert endpoint == ('192.0.2.10', 9444 if existing else 9443)
+            assert endpoint == ('192.0.2.10', expected_api_port or (9444 if existing else 9443))
 
     monkeypatch.setattr(setup.socket, 'socket', lambda *_: Probe())
     clock, observed = {'now': 0}, []

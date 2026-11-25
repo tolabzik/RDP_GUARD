@@ -480,6 +480,7 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
     if item.config.exists() or Path('/opt/rdpguard-proxy').exists() or (item.state / 'state.sqlite3').exists():
         raise SetupError('Существующая установка обнаружена; для неё используйте status/doctor, не новую привязку')
     streams = discover_streams(runner)
+    all_streams = streams
     configured = [cfg for _, cfg, _ in inventory(CONFIG, STATE) if cfg]
     if instance is not None:
         streams = [s for s in streams if not any((s.backend_ip, s.backend_port) ==
@@ -501,12 +502,13 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
                                           input_fn), available)
     default_api = listener if ipaddress.ip_address(listener).is_global else None
     advertised = ipv4(prompt('IPv4 агента, доступный Windows по HTTPS', default_api, input_fn))
-    port_text = prompt('Отдельный HTTPS-порт агента', str(next_api_port(item, listener,
-                       [s.container_port for s in streams])), input_fn)
+    rdp_ports = [s.container_port for s in all_streams
+                 if any(ip in ('0.0.0.0', listener) for ip, _ in s.bindings)]
+    port_text = prompt('Отдельный HTTPS-порт агента', str(next_api_port(item, listener, rdp_ports)), input_fn)
     if not port_text or not port_text.isdigit() or not 1 <= int(port_text) <= 65535:
         raise SetupError('Неверный HTTPS-порт')
     api_port = int(port_text)
-    if api_port == stream.container_port:
+    if api_port in rdp_ports:
         raise SetupError('HTTPS API и RDP должны использовать разные порты')
     routes = json.loads(runner(['ip', '-j', '-4', 'route', 'get', stream.backend_ip]))
     default_relay = routes[0].get('prefsrc') if len(routes) == 1 else None
