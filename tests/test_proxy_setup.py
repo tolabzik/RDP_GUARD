@@ -284,6 +284,7 @@ def test_wizard_waits_for_durable_windows_ack_before_start(tmp_path, monkeypatch
     state = json.loads((test.state / 'setup-state.json').read_text())
     assert state['status'] == 'paired' and state['windows_acknowledged']
     assert ['systemctl', 'enable', 'rdpguard-proxy.service'] in test.calls
+    assert ['systemctl', 'enable', '--now', 'rdpguard-proxy-logrotate.timer'] in test.calls
     assert not test.pairing.exists() and not list(test.state.rglob('ca.key'))
     assert json.loads((test.config / 'config.json').read_text())['enforcement_validated'] is False
 
@@ -295,6 +296,7 @@ def test_expired_issued_receipt_is_not_claimed_as_completed_pairing(tmp_path, mo
     assert state['status'] == 'windows_confirmation_missing' and not state['windows_acknowledged']
     assert ['systemctl', 'start', 'rdpguard-proxy.service'] in test.calls
     assert ['systemctl', 'enable', 'rdpguard-proxy.service'] not in test.calls
+    assert ['systemctl', 'enable', '--now', 'rdpguard-proxy-logrotate.timer'] in test.calls
     assert any('не подтверждено' in line for line in test.output)
     assert not test.pairing.exists() and not list(test.state.rglob('ca.key'))
 

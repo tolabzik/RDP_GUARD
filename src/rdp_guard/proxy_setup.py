@@ -583,6 +583,8 @@ def setup(*, runner=run_command, input_fn=input, output=print, pairing_file=None
         server = None
         save_setup_state(directory=item.state, status='paired' if authority.acknowledged else 'windows_confirmation_missing',
                          windows_acknowledged=authority.acknowledged)
+        # NPM keeps writing even if an agent is stopped or has autostart disabled.
+        runner(['systemctl', 'enable', '--now', 'rdpguard-proxy-logrotate.timer'])
         runner(['systemctl', 'start', item.unit])
         if enable and authority.acknowledged:
             runner(['systemctl', 'enable', item.unit])
