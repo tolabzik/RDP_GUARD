@@ -218,11 +218,19 @@ server {{
             def recovery_command(args):
                 # CI tests discovery here; NTP readiness/retries are separately unit tested.
                 return 'yes' if args[0] == 'timedatectl' else command(args)
-            command(['docker', 'restart', container], timeout=60)
-            wait_ready(probe)
-            resolved = wait_ready(NpmRecovery(cfg, recovery_command))
-            if resolved['nginx_pid_namespace'] == cfg['nginx_pid_namespace']:
-                raise RuntimeError('Docker restart did not produce a fresh verified PID namespace')
+            old_pid = command(['docker', 'inspect', container, '--format', '{{.State.Pid}}']).strip()
+            # Pin the old namespace during restart: Linux may otherwise reuse
+            # its freed nsfs inode number, which is not a recovery failure.
+            with open(f'/proc/{old_pid}/ns/pid', 'rb'):
+                command(['docker', 'restart', container], timeout=60)
+                wait_ready(probe)
+                resolved = wait_ready(NpmRecovery(cfg, recovery_command))
+                new_pid = command(['docker', 'inspect', container, '--format', '{{.State.Pid}}']).strip()
+                observed_namespace = os.readlink(f'/proc/{new_pid}/ns/pid')
+                if (resolved['nginx_pid_namespace'] != observed_namespace
+                        or observed_namespace == cfg['nginx_pid_namespace']):
+                    raise RuntimeError('Restart discovery did not match the new container namespace: '
+                                       f'{cfg["nginx_pid_namespace"]} -> {observed_namespace}; resolved={resolved["nginx_pid_namespace"]}')
             wait_ready(logged, 15)
             passed('restart_rediscovers_exact_stream_and_new_pid_namespace')
             command(["logrotate", "--force", "--state", str(root / "rotation.state"),
