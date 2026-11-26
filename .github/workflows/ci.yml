@@ -163,6 +163,7 @@ jobs:
           cp scripts/Install-ProxyRelease.sh release/
           cp docs/PROXY_SETUP.md release/INSTALL.md
           cp docs/PROXY_MULTI_INSTANCE.md release/PROXY_MULTI_INSTANCE.md
+          cp docs/RECOVERY.md release/RECOVERY.md
           cd release
           sha256sum Install-ProxyRelease.sh > Install-ProxyRelease.sh.sha256
           sha256sum --check *.sha256
