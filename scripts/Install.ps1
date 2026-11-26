@@ -28,6 +28,7 @@ function Set-PrivateDirectory([string]$Path) {
 
 Set-PrivateDirectory $DataRoot
 Set-PrivateDirectory (Join-Path $DataRoot 'logs')
+Set-RdpGuardMaintenance -DataRoot $DataRoot
 New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
 Copy-Item (Join-Path $Payload '*') $InstallRoot -Recurse -Force
 # Program files inherit read/execute access; only Administrators and SYSTEM may modify binaries.
@@ -45,7 +46,7 @@ try {
     Invoke-Sc -Arguments @('create','RDPGuardWeb','binPath=',('"' + (Join-Path $InstallRoot 'webservice.exe') + '"'),'start=','delayed-auto','obj=','NT AUTHORITY\LocalService','depend=','RDPGuardService','DisplayName=','RDP Guard Local Web Panel')
     foreach ($Service in @('RDPGuardService','RDPGuardWeb')) {
         Invoke-Sc -Arguments @('sidtype',$Service,'unrestricted')
-        Invoke-Sc -Arguments @('failure',$Service,'reset=','86400','actions=','restart/10000/restart/60000/none/0')
+        Invoke-Sc -Arguments @('failure',$Service,'reset=','86400','actions=','restart/10000/restart/60000/restart/300000')
         Invoke-Sc -Arguments @('failureflag',$Service,'1')
     }
     $WebSid = (New-Object System.Security.Principal.NTAccount('NT SERVICE\RDPGuardWeb')).Translate([System.Security.Principal.SecurityIdentifier])
@@ -59,6 +60,7 @@ try {
     $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($WebSid,'Modify','ContainerInherit,ObjectInherit','None','Allow')))
     Set-Acl $WebLogs $Acl
 
+    Set-RdpGuardServiceRecovery -DataRoot $DataRoot
     Register-RdpGuardWatchdog -InstallRoot $InstallRoot
 
     if (-not $SkipAdminSetup) {
@@ -68,6 +70,7 @@ try {
     }
     Start-Service RDPGuardService
     Start-Service RDPGuardWeb
+    Remove-Item -LiteralPath (Join-Path $DataRoot 'maintenance.json') -ErrorAction SilentlyContinue
     Write-Host 'Installed in MONITOR ONLY. Panel: http://127.0.0.1:8787'
     Write-Host 'Existing Windows/Kaspersky firewall rules and RDP/audit settings were not changed.'
     if ($SkipAdminSetup) { Write-Warning 'No default password exists. Run rdpguard.exe init-admin --username YOUR_NAME before using the panel.' }

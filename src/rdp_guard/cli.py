@@ -92,10 +92,15 @@ def main(argv=None):
                     raise ValueError("Cannot read the pairing JSON file") from None
                 values = {"document": document, "trusted_relay": values.pop("trust_relay")}
             result = PipeClient().call({"op": operation, "args": values})
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        # Windows redirects stdout using the legacy system code page. ASCII
+        # JSON preserves all Unicode values for ConvertFrom-Json/other clients
+        # without crashing or producing mojibake in a redirected pipe.
+        print(json.dumps(result, indent=2, ensure_ascii=True))
         return 0
     except Exception as exc:
-        print(f"RDP Guard: {exc}", file=sys.stderr)
+        message = f"RDP Guard: {exc}"
+        encoding = getattr(sys.stderr, "encoding", None) or "utf-8"
+        print(message.encode(encoding, errors="backslashreplace").decode(encoding), file=sys.stderr)
         return 1
 
 

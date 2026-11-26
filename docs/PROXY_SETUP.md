@@ -3,7 +3,7 @@
 Начиная с `1.1.0-rc.3`, один Linux-пакет обслуживает несколько Windows через
 отдельные экземпляры служб. [Добавление второго узла](PROXY_MULTI_INSTANCE.md).
 
-Выпуск **1.1.0-rc.3**, пакет для **Ubuntu 24.04 amd64** с уже работающим
+Выпуск **1.1.0-rc.4**, пакет для **Ubuntu 24.04 amd64** с уже работающим
 Nginx Proxy Manager в Docker. Пакет содержит приложение и его Python-библиотеки;
 `apt` устанавливает системные зависимости. Вручную создавать venv или запускать
 pip на сервере не требуется. Начальный режим интеграции — наблюдение;
@@ -12,8 +12,8 @@ pip на сервере не требуется. Начальный режим �
 
 ## 1. Подготовить Windows
 
-Скачайте [Windows ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/RDPGuard-1.1.0-rc.3-win-x64.zip)
-и [его SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/RDPGuard-1.1.0-rc.3-win-x64.zip.sha256).
+Скачайте [Windows ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/RDPGuard-1.1.0-rc.4-win-x64.zip)
+и [его SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/RDPGuard-1.1.0-rc.4-win-x64.zip.sha256).
 Проверьте хеш командой `Get-FileHash` и распакуйте ZIP полностью.
 Из распакованной папки в PowerShell администратора:
 
@@ -38,7 +38,7 @@ Server 2012 R2 пока не подтверждён.
 `curl`, доступ к GitHub и репозиториям Ubuntu, root либо права `sudo`:
 
 ```bash
-(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
+(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
 ```
 
 Установщик конкретного релиза скачивает `.deb` и `.sha256`, сверяет SHA256,
@@ -46,18 +46,18 @@ Server 2012 R2 пока не подтверждён.
 Он сохраняет интерактивный ввод: не запускайте установщик через `curl | bash`.
 При существующей конфигурации выполняется обновление без повторной привязки.
 
-Для ручной установки скачайте [.deb](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/rdpguard-proxy_1.1.0-rc.3_amd64.deb)
-и [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/rdpguard-proxy_1.1.0-rc.3_amd64.deb.sha256)
+Для ручной установки скачайте [.deb](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/rdpguard-proxy_1.1.0-rc.4_amd64.deb)
+и [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/rdpguard-proxy_1.1.0-rc.4_amd64.deb.sha256)
 в один каталог, затем:
 
 ```sh
-sha256sum -c rdpguard-proxy_1.1.0-rc.3_amd64.deb.sha256 && \
-  sudo apt install ./rdpguard-proxy_1.1.0-rc.3_amd64.deb && \
+sha256sum -c rdpguard-proxy_1.1.0-rc.4_amd64.deb.sha256 && \
+  sudo apt install ./rdpguard-proxy_1.1.0-rc.4_amd64.deb && \
   sudo rdpguard-proxy setup
 ```
 
 Переходите к установке только при результате `OK` проверки SHA256. Имя файла
-содержит `1.1.0-rc.3`; внутри Debian-пакета версия записана как `1.1.0~rc3`
+содержит `1.1.0-rc.4`; внутри Debian-пакета версия записана как `1.1.0~rc4`
 для правильного порядка обновлений в `apt`.
 
 ## 3. Пройти мастер и импортировать файл
@@ -155,3 +155,8 @@ sudo apt remove rdpguard-proxy
 поддерживается. До production enforcement нужны проверки реального NPM/Docker,
 Windows-событий, NAT и сохранения доступа легитимных пользователей; изолированный
 Linux DNAT/nftables harness эту сквозную проверку не заменяет.
+
+## Ежедневное выключение серверов
+
+После обновления до rc.4 один раз подтвердите ACTIVE. Службы, синхронизация и обмен
+восстанавливаются автоматически; подробности и проверка — в [RECOVERY.md](RECOVERY.md).

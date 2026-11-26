@@ -7,10 +7,10 @@
 - `C:\Program Files\RDPGuard\`: три exe и общая `_internal`. Не переносите отдельные exe без зависимостей.
 - `C:\ProgramData\RDPGuard\`: SQLite, lease, emergency latch, защищённые журналы.
 - `RDPGuardService`: LocalSystem, Automatic Delayed Start.
-- `RDPGuardWeb`: LocalService, отдельный service SID, Automatic Delayed Start, зависит от Guard Service.
+- `RDPGuardWeb`: LocalService, отдельный service SID, Automatic Delayed Start; работает независимо от Guard Service.
 - `RDPGuardRollback`: SYSTEM Scheduled Task, раз в минуту и при загрузке.
 
-Данные доступны SYSTEM и локальным администраторам. Веб-SID имеет только traverse родительского каталога и Modify в `web-logs`. Бинарники доступны для чтения/запуска Users, изменять их могут только администраторы и SYSTEM. SCM выполняет максимум два автоматических перезапуска подряд, затем оставляет службу остановленной до вмешательства.
+Данные доступны SYSTEM и локальным администраторам. Веб-SID имеет traverse родительского каталога, Modify в `web-logs` и чтение обезличенного состояния в `service-status`. Бинарники доступны для чтения/запуска Users, изменять их могут только администраторы и SYSTEM. С 1.1.0-rc.4 SCM повторяет перезапуск с задержками 10/60/300 секунд; SYSTEM watchdog дополнительно поднимает остановленные службы. [Автовосстановление и журнал причин](RECOVERY.md).
 
 ## Аудит Windows
 

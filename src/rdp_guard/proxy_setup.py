@@ -369,6 +369,12 @@ def doctor(runner=run_command, *, instance=None):
             result['checks']['configured_scope_found'] = len(selected) == 1
             result['checks']['pid_namespace_matches'] = (len(selected) == 1
                 and selected[0].namespace == config['nginx_pid_namespace'])
+            from .proxy_recovery import managed, select_stream
+            if managed(config):
+                current = select_stream(config, streams)
+                result['recovery'] = {'automatic': True, 'stored_namespace': config.get('nginx_pid_namespace'),
+                                      'resolved_namespace': current.namespace, 'container_id': current.container_id}
+                result['checks']['pid_namespace_matches'] = True
             if not result['checks']['pid_namespace_matches']:
                 result['recovery'] = ('NPM container/PID namespace изменился или scope не найден. '
                     'Наблюдение недоступно; нужна проверенная перепривязка namespace и перезапуск агента. '
@@ -428,6 +434,7 @@ def install_enrollment(receipt, stream, plan, pairing_dir, *, destination=None, 
         'listener_ip': plan['listener_ip'], 'listener_port': stream.container_port,
         'relay_ips': plan['relay_ips'], 'nginx_utc_offset_minutes': stream.utc_offset_minutes,
         'nginx_pid_namespace': stream.namespace, 'whitelist': plan['whitelist'],
+        'recover_npm': True,
         'state_file': str((state_directory or STATE) / 'state.sqlite3'), 'enforcement_validated': False, 'protocols': ['tcp'],
     })
     if destination.exists():

@@ -10,16 +10,11 @@ from . import __version__
 from .events import FAILURE_SOURCES, SECURITY, parse_event
 from .firewall import FirewallEngine, owned
 from .models import Settings, address, contains, network, overlaps
+from . import recovery
 
 
 def atomic_json(path: Path, value):
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf-8") as stream:
-        json.dump(value, stream)
-        stream.flush()
-        import os
-        os.fsync(stream.fileno())
-    temporary.replace(path)
+    recovery.atomic_document(path, value)
 
 
 class Guard:
@@ -33,9 +28,13 @@ class Guard:
         self.last_cleanup = 0
         self.last_heartbeat = 0
         self.last_health = 0
+        self.last_tick = self.started
         self.platform_status = {}
         self.last_error = ""
         self.collectors = {}
+        self.service_journal = recovery.ServiceJournal(data_dir)
+        self.recovery_status = {"state": "disabled", "reason": "Автовосстановление ещё не подтверждено"}
+        self.last_recovery = float("-inf")
         self.emergency_path = data_dir / "emergency.disabled"
         self.lease_path = data_dir / "active-lease.json"
         # Do not renew a stale lease on startup before the independent watchdog can inspect it.
@@ -49,6 +48,63 @@ class Guard:
                 self.store.set("mode", "MONITOR ONLY")
                 self.store.set("cleanup_requested", True)
                 self.store.audit("guard", "stale-startup-lease", {}, clock())
+        if recovery.approval(data_dir) and not self.emergency_path.exists():
+            # Even a fast reboot/service restart must obtain fresh health and time evidence.
+            self.store.set("mode", "MONITOR ONLY")
+            self.store.set("cleanup_requested", True)
+            self._recovery_state("waiting", "Проверка после запуска службы")
+
+    def _recovery_state(self, state, reason):
+        self.recovery_status = {"state": state, "reason": reason, "updated_at": self.clock()}
+        self.service_journal.transition("protection", state, reason, now=self.clock())
+
+    def _try_resume(self, force=False):
+        consent = recovery.approval(self.data_dir)
+        if not consent or self.emergency_path.exists():
+            return
+        now = self.clock()
+        if not force and 0 <= now - self.last_recovery < 15:
+            return
+        self.last_recovery = now
+        try:
+            if recovery.maintenance(self.data_dir, now):
+                raise RuntimeError("Установка обновления: восстановление временно приостановлено")
+            if consent["rdp_port"] != self.settings.rdp_port or not self.trusted(consent["admin_ip"]):
+                raise RuntimeError("Изменились RDP-порт или доверенный адрес подтверждения; нужна новая активация")
+            health = self.safety.recovery_health(self.settings.rdp_port, [network(consent["admin_ip"])])
+            required = ("firewall", "listening", "port_matches", "allow_rules", "watchdog", "audit_logon", "time_sync")
+            failed = [key for key in required if health.get(key) is not True]
+            if failed:
+                raise RuntimeError("Ожидание проверок: " + ", ".join(failed) + "; " + "; ".join(health.get("errors", [])))
+            self.protected()  # An empty inventory is valid; an unverifiable one is not.
+            if not self.collectors.get(SECURITY, {}).get("healthy"):
+                raise RuntimeError("Ожидание подписки на журнал Security")
+            from .firewall import GROUP, PREFIX
+            if any((r.group == GROUP or r.name.startswith(PREFIX)) and not owned(r)
+                   for r in self.firewall.backend.list_rules()):
+                raise RuntimeError("Не подтверждена принадлежность правил firewall")
+            white = self.store.rows("SELECT network FROM whitelist")
+            blocks = self.store.rows("SELECT network FROM blocks WHERE ended IS NULL")
+            if any(overlaps(b["network"], w["network"]) for b in blocks for w in white):
+                raise RuntimeError("Пересечение белого списка и блокировок")
+            recent = self.store.rows("SELECT COUNT(*) n FROM blocks WHERE kind='dynamic' AND created>?", (now - 60,))[0]["n"]
+            if recent >= self.settings.max_blocks_per_minute or len(blocks) >= self.settings.max_block_entries:
+                raise RuntimeError("Ожидание освобождения лимита блокировок")
+            with self.firewall_lock():
+                if self.emergency_path.exists() or recovery.approval(self.data_dir) != consent:
+                    raise RuntimeError("Разрешение на восстановление отозвано")
+                atomic_json(self.lease_path, {"started": now, "deadline": None, "heartbeat": now,
+                                              "confirmed": True, "recovered": True})
+                with self.store.transaction() as db:
+                    # Monitoring decisions must not be promoted into active bans.
+                    db.execute("UPDATE blocks SET ended=?,status='discarded' WHERE ended IS NULL AND status='proposed'", (now,))
+                    self.store.set("mode", "ACTIVE")
+                    self.store.audit("recovery", "activation-restored", {"admin_ip": consent["admin_ip"]}, now)
+            self.platform_status = health
+            self.last_error = ""
+            self._recovery_state("active", "Защита восстановлена после успешных проверок")
+        except Exception as exc:
+            self._recovery_state("waiting", str(exc))
 
     @property
     def mode(self):
@@ -176,6 +232,8 @@ class Guard:
     def _set_monitor(self, actor, action):
         # Persist inhibition before touching the firewall. Failed removal remains visible and retryable.
         self.store.set("mode", "MONITOR ONLY")
+        recovery.revoke(self.data_dir)
+        self._recovery_state("disabled", action)
         self.store.set("cleanup_requested", True)
         self.store.audit(actor, action, {}, self.clock())
         self._cleanup()
@@ -183,14 +241,29 @@ class Guard:
     def _cleanup(self):
         with self.firewall_lock():
             self.firewall.clear()
+            self.lease_path.unlink(missing_ok=True)
         self.store.db.execute("UPDATE blocks SET status='suspended',error='' WHERE ended IS NULL AND status!='proposed'")
         self.store.set("cleanup_requested", False)
-        self.lease_path.unlink(missing_ok=True)
         self.last_error = ""
+
+    def _renew_lease(self, previous, updated):
+        # The independent watchdog can withdraw a lease while a native health
+        # query is running. Never resurrect that stale authority afterwards.
+        with self.firewall_lock():
+            current = json.loads(self.lease_path.read_text(encoding="utf-8"))
+            if current != previous or self.emergency_path.exists():
+                raise RuntimeError("Active lease was withdrawn during health checks")
+            atomic_json(self.lease_path, updated)
 
     def tick(self, force=False):
         with self.lock:
             now = self.clock()
+            if now < self.last_tick:
+                # An NTP correction must not postpone heartbeat and retries
+                # until the old wall clock catches up.
+                self.last_sync = self.last_health = self.last_heartbeat = self.last_cleanup = 0
+                self.last_recovery = float("-inf")
+            self.last_tick = now
             try:
                 if self.emergency_path.exists() and self.mode == "ACTIVE":
                     self._set_monitor("watchdog", "emergency-latch-observed")
@@ -202,6 +275,8 @@ class Guard:
                 if force or not self.platform_status or now - self.last_health >= 10:
                     self.platform_status = self.safety.health(self.settings.rdp_port)
                     self.last_health = now
+                if self.mode != "ACTIVE":
+                    self._try_resume(force=force)
                 if self.mode == "ACTIVE":
                     if not self.lease_path.exists():
                         raise RuntimeError("Active lease is missing")
@@ -219,8 +294,7 @@ class Guard:
                         self._sync(sessions)
                         self.last_sync = now
                     if now - self.last_heartbeat >= 10:
-                        lease["heartbeat"] = now
-                        atomic_json(self.lease_path, lease)
+                        self._renew_lease(lease, dict(lease, heartbeat=now))
                         self.last_heartbeat = now
                 if now - self.last_cleanup >= 3600:
                     with self.store.transaction() as db:
@@ -236,6 +310,7 @@ class Guard:
                 if self.mode == "ACTIVE":
                     self.store.set("mode", "MONITOR ONLY")
                     self.store.set("cleanup_requested", True)
+                    self._recovery_state("waiting" if recovery.approval(self.data_dir) else "disabled", self.last_error)
                 raise
 
     def _sync(self, sessions):
@@ -252,6 +327,10 @@ class Guard:
         with self.firewall_lock():
             if self.emergency_path.exists() or self.mode != "ACTIVE":
                 raise RuntimeError("Firewall writes inhibited by emergency/monitor mode")
+            lease = json.loads(self.lease_path.read_text(encoding="utf-8"))
+            now = self.clock()
+            if lease.get("deadline") is not None and now >= lease["deadline"]:
+                raise RuntimeError("Firewall writes inhibited by an expired lease")
             self.firewall.reconcile(desired, self.settings.rdp_port, self.settings.batch_size)
         with self.store.transaction() as db:
             for row in blocks:
@@ -297,11 +376,13 @@ class Guard:
             raise ValueError("Preflight failed: " + ", ".join(k for k, v in preflight["checks"].items() if not v))
         if self.mode == "ACTIVE":
             raise ValueError("Protection is already active")
+        recovery.revoke(self.data_dir)
         now = self.clock()
         # Lease exists BEFORE active state. The independent task survives guard/web failure and reboots.
-        atomic_json(self.lease_path, {"started": now, "deadline": now + self.settings.rollback_seconds,
-                                      "heartbeat": now, "confirmed": False})
-        self.emergency_path.unlink(missing_ok=True)
+        with self.firewall_lock():
+            atomic_json(self.lease_path, {"started": now, "deadline": now + self.settings.rollback_seconds,
+                                          "heartbeat": now, "confirmed": False})
+            self.emergency_path.unlink(missing_ok=True)
         with self.store.transaction() as db:
             db.execute("UPDATE blocks SET ended=?,status='discarded' WHERE ended IS NULL AND status='proposed'", (now,))
             self.store.set("mode", "ACTIVE")
@@ -335,8 +416,10 @@ class Guard:
         if proof is None:
             raise ValueError("Не найдено новое административное RDP-подключение после включения защиты "
                              "с адреса из белого списка. Закройте окно RDP, подключитесь снова и повторите подтверждение.")
-        lease.update(deadline=None, confirmed=True, heartbeat=now)
-        atomic_json(self.lease_path, lease)
+        with self.firewall_lock():
+            self._renew_lease(lease, dict(lease, deadline=None, confirmed=True, heartbeat=now))
+            recovery.approve(self.data_dir, self.settings.rdp_port, proof["ip"], now)
+        self._recovery_state("active", "Активация подтверждена; автоматическое восстановление разрешено")
         self.store.audit(actor, "activation-confirmed", {key: proof[key] for key in
             ("id", "username", "domain", "ip", "ip_source", "source_record_id", "source_timestamp", "connected_at")}, now)
         return {"confirmed": True}
@@ -394,6 +477,7 @@ class Guard:
                 "whitelist_count": self.store.rows("SELECT COUNT(*) n FROM whitelist")[0]["n"],
                 "last_error": self.last_error, "collectors": self.collectors,
                 "emergency_disabled": self.emergency_path.exists(),
+                "recovery": self.recovery_status | {"approved": bool(recovery.approval(self.data_dir))},
                 "lease": json.loads(self.lease_path.read_text(encoding="utf-8")) if self.lease_path.exists() else None}
 
     def _commit_proxy_binding(self, binding, actor, *, trusted_relay=None):
@@ -432,9 +516,32 @@ class Guard:
             self.proxy_enrollment = EnrollmentManager(self)
         return self.proxy_enrollment
 
+    def proxy_results(self, args):
+        from .proxy_client import ProxyTransport, validate_binding, sanitize_status
+        with self.lock:
+            binding = validate_binding(self.data_dir, self.store.get("proxy_binding", {}))
+        if not binding["enabled"]:
+            raise ValueError("Proxy is not connected")
+        request = {key: args.get(key, default) for key, default in
+                   (("query", ""), ("status", ""), ("offset", 0), ("sort", "recent"))}
+        receipt = ProxyTransport(binding).post("/v1/results", dict(request,
+            stream_id=binding["stream_id"], backend_id=binding["backend_id"]))
+        status = sanitize_status(receipt)
+        if any(status.get(key) != binding[key] for key in ("stream_id", "backend_id", "computer")):
+            raise ValueError("Results belong to another proxy binding")
+        with self.lock:
+            if self.store.get("proxy_binding") != binding:
+                raise ValueError("Proxy binding changed while fetching results")
+        return {"results": status["results"], "total": int(receipt["total"]),
+                "offset": int(receipt["offset"]), "limit": 50,
+                "whitelist": [network(item) for item in receipt.get("whitelist", [])][:1000],
+                "threshold": int(receipt["threshold"]), "window_seconds": int(receipt["window_seconds"])}
+
     def dispatch(self, operation, args, actor):
         if not isinstance(args, dict):
             raise ValueError("Arguments must be an object")
+        if operation == "proxy-results":
+            return self.proxy_results(args)
         with self.lock:
             if operation == "proxy-pair-preview":
                 return self._enrollment().preview(args.get("document"))
@@ -496,6 +603,15 @@ class Guard:
                 return {"ok": True, "queued": True}
             if operation == "status":
                 return self.snapshot()
+            if operation == "service-events":
+                records = self.service_journal.recent()
+                if platform.system() == "Windows":
+                    try:
+                        from .windows.recovery import scm_events
+                        records += scm_events()
+                    except Exception as exc:
+                        records.append({"timestamp": self.clock(), "component": "Windows SCM", "event": "read-error", "detail": str(exc)})
+                return sorted(records, key=lambda row: row["timestamp"], reverse=True)[:200]
             if operation == "health":
                 return self.snapshot() | {"platform": self.safety.health(self.settings.rdp_port),
                                           "integrity": self.store.rows("PRAGMA quick_check")}

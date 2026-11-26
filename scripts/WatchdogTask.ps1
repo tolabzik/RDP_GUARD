@@ -1,5 +1,37 @@
 #Requires -Version 5.1
 # Shared by installation and update. Defining these functions changes no system state.
+function Set-RdpGuardMaintenance {
+    param([Parameter(Mandatory)][string]$DataRoot)
+    $Until = [math]::Floor(([DateTime]::UtcNow - [DateTime]'1970-01-01Z').TotalSeconds) + 1800
+    @{ until = $Until } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DataRoot 'maintenance.json') -Encoding ASCII
+}
+
+function Set-RdpGuardServiceRecovery {
+    param([Parameter(Mandatory)][string]$DataRoot)
+    foreach ($Service in @('RDPGuardService','RDPGuardWeb')) {
+        & sc.exe config $Service start= delayed-auto | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Cannot configure startup: $Service" }
+        & sc.exe failure $Service reset= 86400 actions= restart/10000/restart/60000/restart/300000 | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Cannot configure recovery: $Service" }
+        & sc.exe failureflag $Service 1 | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Cannot configure failure flag: $Service" }
+    }
+    # Keep the diagnostic web process available while the protection service recovers.
+    & sc.exe config RDPGuardWeb depend= / | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot separate web service recovery.' }
+    $Public = Join-Path $DataRoot 'service-status'
+    New-Item -ItemType Directory -Path $Public -Force | Out-Null
+    $Acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $Acl.SetAccessRuleProtection($true, $false)
+    foreach ($Sid in @('S-1-5-18','S-1-5-32-544')) {
+        $Identity = New-Object System.Security.Principal.SecurityIdentifier($Sid)
+        $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($Identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+    }
+    $WebSid = (New-Object System.Security.Principal.NTAccount('NT SERVICE\RDPGuardWeb')).Translate([System.Security.Principal.SecurityIdentifier])
+    $Acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($WebSid,'ReadAndExecute','ContainerInherit,ObjectInherit','None','Allow')))
+    Set-Acl $Public $Acl
+}
+
 function New-RdpGuardWatchdogXml {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Executable, [Parameter(Mandatory)][datetime]$StartAt)

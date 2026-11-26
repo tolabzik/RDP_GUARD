@@ -190,7 +190,7 @@ server {{
             # disposable NPM log and certificate/config directory in scope.
             pairing_directory = root / "pairing"
             plan = dict(agent_url=f"https://{ADDRESS}:9443", api_port=9443,
-                        stream_id="npm-test", backend_id="echo-test", listener_ip=ADDRESS,
+                        stream_id=f"npm-987654-{LISTENER}", backend_id="echo-test", listener_ip=ADDRESS,
                         relay_ips=[ADDRESS], whitelist=["198.51.100.7/32"])
             settings = {key: value for key, value in plan.items() if key != "api_port"}
             settings.update(listener_port=LISTENER, backend_ip=ADDRESS,
@@ -205,12 +205,34 @@ server {{
             second_stream, = [s for s in streams if s.container_name.lstrip('/') == container
                              and s.container_port == SECOND_LISTENER]
             acquire_logging(second, second_stream, second.state / 'backup', command)
-            second_plan = dict(plan, stream_id='second', backend_id='second', api_port=9444)
+            second_plan = dict(plan, stream_id=f'npm-987655-{SECOND_LISTENER}', backend_id='second', api_port=9444)
             install_enrollment(dict(computer='SECOND-WINDOWS', client_sha256='b' * 64),
                                second_stream, second_plan, pairing_directory,
                                destination=second.config, state_directory=second.state)
             wait_ready(lambda: probe(SECOND_LISTENER), 15)
             passed('two_nodes_share_logging_and_forward_independently')
+            # Real Docker restart changes the PID namespace, while approved
+            # endpoint, mount and stream ID must still identify the same route.
+            from rdp_guard.proxy_recovery import NpmRecovery
+            cfg = json.loads((installed / 'config.json').read_text())
+            def recovery_command(args):
+                # CI tests discovery here; NTP readiness/retries are separately unit tested.
+                return 'yes' if args[0] == 'timedatectl' else command(args)
+            old_pid = command(['docker', 'inspect', container, '--format', '{{.State.Pid}}']).strip()
+            # Pin the old namespace during restart: Linux may otherwise reuse
+            # its freed nsfs inode number, which is not a recovery failure.
+            with open(f'/proc/{old_pid}/ns/pid', 'rb'):
+                command(['docker', 'restart', container], timeout=60)
+                wait_ready(probe)
+                resolved = wait_ready(NpmRecovery(cfg, recovery_command))
+                new_pid = command(['docker', 'inspect', container, '--format', '{{.State.Pid}}']).strip()
+                observed_namespace = os.readlink(f'/proc/{new_pid}/ns/pid')
+                if (resolved['nginx_pid_namespace'] != observed_namespace
+                        or observed_namespace == cfg['nginx_pid_namespace']):
+                    raise RuntimeError('Restart discovery did not match the new container namespace: '
+                                       f'{cfg["nginx_pid_namespace"]} -> {observed_namespace}; resolved={resolved["nginx_pid_namespace"]}')
+            wait_ready(logged, 15)
+            passed('restart_rediscovers_exact_stream_and_new_pid_namespace')
             command(["logrotate", "--force", "--state", str(root / "rotation.state"),
                      str(installed / "logrotate.conf")])
             if not log.with_name(log.name + ".1").is_file():

@@ -1,6 +1,6 @@
 # RDP Guard
 
-**Текущий выпуск: [1.1.0-rc.3](https://github.com/tolabzik/RDP_GUARD/releases/tag/v1.1.0-rc.3), предварительный, из `main`.**
+**Текущий выпуск: [1.1.0-rc.4](https://github.com/tolabzik/RDP_GUARD/releases/tag/v1.1.0-rc.4), предварительный, из `main`.**
 
 RDP Guard собирает события входа Windows и блокирует адреса, с которых подбирают
 пароли. Веб-панель работает на самом Windows-сервере: **http://127.0.0.1:8787**.
@@ -22,11 +22,11 @@ RDP Guard собирает события входа Windows и блокируе
 
 | Пакет | Скачать | Проверка |
 |---|---|---|
-| Windows x64 | [ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/RDPGuard-1.1.0-rc.3-win-x64.zip) | [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/RDPGuard-1.1.0-rc.3-win-x64.zip.sha256) |
-| Ubuntu 24.04 amd64 | [.deb](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/rdpguard-proxy_1.1.0-rc.3_amd64.deb) | [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/rdpguard-proxy_1.1.0-rc.3_amd64.deb.sha256) |
+| Windows x64 | [ZIP](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/RDPGuard-1.1.0-rc.4-win-x64.zip) | [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/RDPGuard-1.1.0-rc.4-win-x64.zip.sha256) |
+| Ubuntu 24.04 amd64 | [.deb](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/rdpguard-proxy_1.1.0-rc.4_amd64.deb) | [SHA256](https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/rdpguard-proxy_1.1.0-rc.4_amd64.deb.sha256) |
 
-[Все файлы релиза](https://github.com/tolabzik/RDP_GUARD/releases/tag/v1.1.0-rc.3) ·
-[Изменения rc.3](docs/RELEASE_NOTES.md) · [Подробная установка](docs/PROXY_SETUP.md).
+[Все файлы релиза](https://github.com/tolabzik/RDP_GUARD/releases/tag/v1.1.0-rc.4) ·
+[Изменения rc.4](docs/RELEASE_NOTES.md) · [Подробная установка](docs/PROXY_SETUP.md).
 Для скачивания вход в GitHub не нужен. Windows ZIP включает приложение и скрипты:
 Python на сервер ставить и EXE самостоятельно собирать не требуется.
 Бинарники пока без Authenticode-подписи.
@@ -36,7 +36,7 @@ Python на сервер ставить и EXE самостоятельно со
 На Linux с уже работающим NPM в Docker, в интерактивной SSH-консоли выполните:
 
 ```bash
-(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
+(set -e; rdp_installer=$(mktemp); trap 'rm -f "$rdp_installer"' EXIT; curl -fL --proto '=https' --tlsv1.2 'https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/Install-ProxyRelease.sh' -o "$rdp_installer"; bash "$rdp_installer")
 ```
 
 Нужны **Ubuntu 24.04 amd64**, `curl`, доступ к репозиториям и права root/`sudo`.
@@ -129,6 +129,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Update.ps1"
 ![Панель RDP Guard с искусственными событиями проверки](docs/images/dashboard.jpg)
 
 На снимке — искусственные события проверки интерфейса.
+
+## Перезапуски и диагностика
+
+После обновления один раз включите и подтвердите ACTIVE. На «Обзоре» появится
+«Автовосстановление разрешено»: при следующем утреннем включении службы и обмен
+с прокси вернутся автоматически, а защита — после проверки времени и доступа.
+Ручные Monitor Only и Emergency Disable отменяют автовосстановление.
+
+«Система → История службы и восстановления» показывает остановки, сбои и повторные
+запуски. Если Guard недоступен, отдельная веб-служба показывает состояние восстановления.
+В «Прокси» добавлены поиск, фильтр статуса, сортировка, страницы и снятие нескольких
+банов. [Порядок обновления и поведение при сбоях](docs/RECOVERY.md).
 
 ## Когда начинаются блокировки
 

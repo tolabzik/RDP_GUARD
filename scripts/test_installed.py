@@ -13,6 +13,8 @@ import time
 import httpx
 import psutil
 import win32service
+import win32serviceutil
+from rdp_guard.recovery import atomic_document, ServiceJournal
 import win32api
 import win32file
 import win32net
@@ -296,6 +298,38 @@ with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15)
     check_installed_collectors()
     response = client.post("/api/rpc", headers=headers, json={"op": "activate", "args": {"confirmation": "ENABLE RDP GUARD", "backup_access": True}})
     assert response.status_code == 400, "RDP is not configured on 33345; activation must fail"
+
+# Actual service recovery on this disposable runner: both a clean stop and a
+# killed process must recover, while the separate web process remains reachable.
+
+recovery_dir = Path(os.environ["ProgramData"]) / "RDPGuard"
+maintenance_path = recovery_dir / "maintenance.json"
+atomic_document(maintenance_path, {"until": time.time() + 300})
+win32serviceutil.StopService("RDPGuardService")
+win32serviceutil.WaitForServiceStatus("RDPGuardService", win32service.SERVICE_STOPPED, 30)
+with httpx.Client(base_url="http://127.0.0.1:8787", trust_env=False, timeout=15) as offline:
+    response = offline.get("/")
+    assert response.status_code == 503 and "unavailable.js" in response.text, response.text
+    assert offline.get("/api/service-status").status_code == 200
+maintenance_path.unlink()
+subprocess.run([cli, "watchdog"], check=True, timeout=30)
+win32serviceutil.WaitForServiceStatus("RDPGuardService", win32service.SERVICE_RUNNING, 30)
+check_installed_collectors()
+old_pid = psutil.win_service_get("RDPGuardService").pid()
+assert old_pid and psutil.Process(old_pid).exe().lower() == str(root / "guardservice.exe").lower()
+psutil.Process(old_pid).kill()
+for _ in range(90):
+    service_info = psutil.win_service_get("RDPGuardService")
+    if service_info.status() == "running" and service_info.pid() and service_info.pid() != old_pid:
+        break
+    time.sleep(1)
+else:
+    raise AssertionError("SCM/watchdog did not recover the crashed protection service")
+check_installed_collectors()
+history = ServiceJournal(recovery_dir).recent()
+assert any(row["event"] == "stop-requested" for row in history)
+assert any(row["event"] == "unclean-exit" for row in history)
+print("Stopped/crashed installed service recovered; offline web and durable lifecycle history passed.")
 
 listeners = [c for c in psutil.net_connections(kind="tcp") if c.status == "LISTEN" and c.laddr.port == 8787]
 assert listeners and all(c.laddr.ip == "127.0.0.1" for c in listeners)

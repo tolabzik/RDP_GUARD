@@ -145,7 +145,15 @@ class WindowsSafety:
         except Exception as exc:
             return {"healthy": False, "sessions": sessions, "error": str(exc)}
 
-    def health(self, port):
+    def recovery_health(self, port, required_networks):
+        result = self.health(port, required_networks=required_networks)
+        state = self.time_sync.snapshot() if hasattr(self, "time_sync") else {"ready": False, "reason": "Windows Time ещё не проверен"}
+        result["time_sync"] = state["ready"]
+        if not state["ready"]:
+            result["errors"].append(state["reason"])
+        return result
+
+    def health(self, port, required_networks=()):
         import psutil
         import winreg
         import win32com.client
@@ -183,7 +191,11 @@ class WindowsSafety:
                         continue
                     if not port_in_rule(rule.LocalPorts, port):
                         continue
-                    if not clients or not all(remote_allowed(rule.RemoteAddresses, ip) for ip in clients):
+                    if not clients and not required_networks:
+                        continue
+                    if not all(remote_allowed(rule.RemoteAddresses, ip) for ip in clients):
+                        continue
+                    if not all(remote_network_allowed(rule.RemoteAddresses, net) for net in required_networks):
                         continue
                     for profile in profiles:
                         if rule.Profiles & profile:
@@ -281,6 +293,20 @@ def remote_allowed(value, ip):
     for part in value.split(","):
         try:
             if ipaddress.ip_address(ip) in ipaddress.ip_network(part.strip(), strict=False):
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def remote_network_allowed(value, network):
+    if value == "*":
+        return True
+    target = ipaddress.ip_network(network)
+    for part in value.split(","):
+        try:
+            candidate = ipaddress.ip_network(part.strip(), strict=False)
+            if candidate.version == target.version and target.subnet_of(candidate):
                 return True
         except ValueError:
             pass

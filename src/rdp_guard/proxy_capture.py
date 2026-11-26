@@ -20,6 +20,7 @@ import struct
 import sys
 import threading
 import time
+import logging
 import uuid
 
 
@@ -469,8 +470,9 @@ class ContinuousCapture:
     epochs. A configured namespace stays unavailable if that namespace vanishes.
     With auto selection, a subsequent unambiguous namespace may start a new epoch.
     """
-    def __init__(self, config, stop):
+    def __init__(self, config, stop, resolver=None):
         self.config, self.stop = capture_config(config), stop
+        self.resolver = resolver
         self._lock, self._thread = threading.Lock(), None
         self._clock = time.monotonic
         self._state = {"healthy": False, "error": "capture_not_started", "epoch": "",
@@ -533,18 +535,26 @@ class ContinuousCapture:
                 self._unavailable(previous_error or "capture_initializing", writer.capture_id)
                 session = None
                 began, next_checkpoint = self._clock(), self._clock()
+                first_checkpoint = True
                 try:
-                    session = CaptureSession(self.config, writer)
+                    current = self.resolver() if self.resolver else self.config
+                    session = CaptureSession(current, writer)
                     while not self.stop.is_set():
                         if self._clock() - began >= self.config["epoch_seconds"]:
                             raise CaptureError("epoch_time_limit_reached")
                         checkpoint = self._clock() >= next_checkpoint
                         if session.poll(wait=0.1, checkpoint=checkpoint):
                             self._publish(writer)
+                            if first_checkpoint and self.resolver:
+                                logging.info("Proxy capture ready after verified NPM discovery; namespace=%s", current.get("nginx_pid_namespace"))
+                            first_checkpoint = False
                             next_checkpoint = self._clock() + 1
                 except Exception as exc:
-                    previous_error = ("netlink_enobufs" if isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
-                                      else str(exc) or type(exc).__name__)
+                    error = ("netlink_enobufs" if isinstance(exc, OSError) and exc.errno == errno.ENOBUFS
+                             else str(exc) or type(exc).__name__)
+                    if self.resolver and (error != previous_error or not first_checkpoint):
+                        logging.warning("Proxy capture unavailable; retrying: %s", error)
+                    previous_error = error
                     self._unavailable(previous_error)
                 finally:
                     if session is not None:
@@ -552,7 +562,7 @@ class ContinuousCapture:
                 # Explicit unhealthy interval between generations. No old prefix
                 # is eligible while initial dump and log subscription are rebuilt.
                 if not self.stop.is_set():
-                    self.stop.wait(1)
+                    self.stop.wait(5 if self.resolver else 1)
         finally:
             self._unavailable("capture_stopped")
 

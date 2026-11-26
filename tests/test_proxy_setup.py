@@ -340,13 +340,13 @@ def test_unconfigure_refuses_concurrent_operator_include_change(tmp_path, monkey
     assert path.read_bytes() == before
 
 
-def test_doctor_reports_container_namespace_change_without_rebinding(tmp_path, monkeypatch):
+def test_doctor_resolves_managed_namespace_change_without_rebinding(tmp_path, monkeypatch):
     test = wizard(tmp_path, monkeypatch)
     test.execute()
     monkeypatch.setattr(setup.os, 'readlink', lambda _: 'pid:[9999]')
     result = setup.doctor(test.runner)
-    assert result['checks']['pid_namespace_matches'] is False
-    assert 'перепривязка' in result['recovery']
+    assert result['checks']['pid_namespace_matches'] is True
+    assert result['recovery']['resolved_namespace'] == 'pid:[9999]'
     assert json.loads((test.config / 'config.json').read_text())['nginx_pid_namespace'] == 'pid:[4242]'
 
 

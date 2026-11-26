@@ -14,11 +14,31 @@ COOKIE = "rdpguard_session"
 ROOT = Path(__file__).parent
 
 
-def create_app(client=None):
+def create_app(client=None, status_path=None):
     client = client or PipeClient()
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     templates = Jinja2Templates(directory=str(ROOT / "templates"))
     app.mount("/static", StaticFiles(directory=str(ROOT / "static")), name="static")
+
+    def service_status():
+        from ..windows.platform import DATA_DIR
+        path = Path(status_path) if status_path else DATA_DIR / "service-status/status.json"
+        try:
+            if path.stat().st_size > 8192:
+                raise ValueError("Oversized status")
+            value = json.loads(path.read_text(encoding="utf-8"))
+            # Public loopback health contains only numeric SCM status, never detailed history.
+            return {"checked_at": float(value["checked_at"]), "services": {
+                name: {key: item[key] for key in ("state", "exit_code", "service_exit_code")
+                       if type(item.get(key)) is int}
+                for name, item in value["services"].items()
+                if name in ("RDPGuardService", "RDPGuardWeb")}}
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return {"checked_at": None, "services": {}}
+
+    @app.get("/api/service-status")
+    async def local_service_status():
+        return service_status()
 
     @app.middleware("http")
     async def boundaries(request: Request, call_next):
@@ -64,7 +84,8 @@ def create_app(client=None):
 
     @app.exception_handler(Exception)
     async def service_error(request, exc):
-        return JSONResponse({"error": "Guard service is unavailable. Use the local emergency CLI if necessary."}, status_code=503)
+        return JSONResponse({"error": "Служба защиты недоступна. Watchdog повторяет запуск; подробности появятся в журнале службы после восстановления.",
+                             "service_status": service_status()}, status_code=503)
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
@@ -74,6 +95,8 @@ def create_app(client=None):
             if exc.code == 401:
                 return RedirectResponse("/login", 303)
             raise
+        except Exception:
+            return templates.TemplateResponse(request=request, name="unavailable.html", context={}, status_code=503)
         return templates.TemplateResponse(request=request, name="index.html", context={"user": user["username"]})
 
     @app.get("/login", response_class=HTMLResponse)
