@@ -72,7 +72,7 @@ def load_config(value):
                 "listener_ip", "listener_port", "relay_ips", "nginx_utc_offset_minutes", "whitelist"}
     optional = {"schema", "nginx_pid_namespace", "threshold", "window_seconds", "ban_seconds",
                 "max_blocks", "max_blocks_per_minute", "enforcement_validated", "protocols",
-                "state_file", "epoch_seconds", "max_records", "max_log_bytes"}
+                "state_file", "epoch_seconds", "max_records", "max_log_bytes", "recover_npm"}
     if required - value.keys() or value.keys() - required - optional:
         raise ValueError("Missing or unknown agent configuration fields")
     cfg = dict(value)
@@ -112,6 +112,8 @@ def load_config(value):
     cfg.setdefault("enforcement_validated", False)
     if type(cfg["enforcement_validated"]) is not bool:
         raise ValueError("enforcement_validated must be boolean")
+    if "recover_npm" in cfg and type(cfg["recover_npm"]) is not bool:
+        raise ValueError("recover_npm must be boolean")
     cfg.setdefault("protocols", ["tcp"])
     if cfg["protocols"] not in (["tcp"], ["tcp", "udp"]):
         raise ValueError("Publish TCP explicitly; add UDP only if that listener is actually published")
@@ -235,6 +237,28 @@ class Agent:
             if path == "/v1/status":
                 if set(envelope) != {"stream_id", "backend_id"}:
                     raise ValueError("Unknown status fields")
+            elif path == "/v1/results":
+                if set(envelope) != {"stream_id", "backend_id", "query", "status", "offset", "sort"}:
+                    raise ValueError("Unknown result query fields")
+                query, state, sort = envelope["query"], envelope["status"], envelope["sort"]
+                if not isinstance(query, str) or not re.fullmatch(r"[0-9a-fA-F:.]{0,45}", query):
+                    raise ValueError("Search requires an IP address or prefix")
+                if state not in ("", "observed", "proposed", "pending", "blocked", "whitelisted", "removed", "suspended", "expired", "removal_pending"):
+                    raise ValueError("Unknown result status")
+                if sort not in ("recent", "attempts", "ip"):
+                    raise ValueError("Unknown result sorting")
+                offset = integer(envelope["offset"], 0, 100000)
+                rows = [r for r in self.results(limit=100000) if query.lower() in r["client_ip"].lower()
+                        and (not state or r["status"] == state)]
+                if sort == "attempts":
+                    rows.sort(key=lambda row: (-row["attempts"], row["client_ip"]))
+                elif sort == "ip":
+                    rows.sort(key=lambda row: (ipaddress.ip_address(row["client_ip"]).version,
+                                               int(ipaddress.ip_address(row["client_ip"]))))
+                return {"ok": True, "status": self.status(), "results": rows[offset:offset + 50],
+                        "total": len(rows), "offset": offset, "limit": 50,
+                        "whitelist": self.config["whitelist"], "threshold": self.config["threshold"],
+                        "window_seconds": self.config["window_seconds"]}
             elif path == "/v1/evidence":
                 if set(envelope) != {"stream_id", "backend_id", "mode", "document"}:
                     raise ValueError("Unknown evidence fields")
@@ -421,15 +445,15 @@ class Agent:
                                    for ip, until in self.applied_until.items()),
                 "error": self.error[:500], **{key: self.config[key] for key in ("stream_id", "backend_id", "computer")}}
 
-    def results(self):
+    def results(self, limit=100):
         # One current row per client; native decision/proof history stays in SQLite.
         result = [dict(row) for row in self.db.execute("""
             SELECT client_ip,attempts,status,reason,expires FROM (
                 SELECT client_ip,attempts,status,reason,expires,timestamp,
                        ROW_NUMBER() OVER (PARTITION BY client_ip ORDER BY timestamp DESC,id DESC) AS rank
                 FROM decisions
-            ) WHERE rank=1 ORDER BY timestamp DESC LIMIT 100
-        """)]
+            ) WHERE rank=1 ORDER BY timestamp DESC LIMIT ?
+        """, (limit,))]
         now = self.clock()
         logical = {row["client_ip"]: row["expires"] for row in
                    self.db.execute("SELECT client_ip,expires FROM bans WHERE expires>?", (now,))}
@@ -561,7 +585,8 @@ def main(argv=None):
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
-    capture = ContinuousCapture(config, stop)
+    from .proxy_recovery import NpmRecovery, managed
+    capture = ContinuousCapture(config, stop, resolver=NpmRecovery(config) if managed(config) else None)
     # One process owns this scoped state/firewall. A duplicate systemd/manual
     # launch must not race set replacement or share replay counters.
     import fcntl

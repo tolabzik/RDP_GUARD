@@ -1,6 +1,7 @@
 "use strict";
 const $ = id => document.getElementById(id);
 let csrf = "", view = "dashboard", loading = false, filters = {}, offset = 0;
+let proxyFilter = {query:"",status:"",sort:"recent",offset:0}, proxySelection = new Set();
 const titles = {dashboard:"Обзор защиты", events:"События аутентификации", blocks:"Блокировки", whitelist:"Белый список", proxy:"Защита через прокси", settings:"Настройки защиты", system:"Система и диагностика"};
 const fmt = value => value ? new Date(value * 1000).toLocaleString("ru-RU") : "—";
 const number = value => Number(value || 0).toLocaleString("ru-RU");
@@ -20,6 +21,7 @@ function notice(error) { $("notice").hidden = false; $("notice").textContent = e
 async function api(op, args={}) {
   const response = await fetch("/api/rpc", {method:"POST", headers:{"Content-Type":"application/json", "X-CSRF-Token":csrf}, body:JSON.stringify({op,args})});
   const data = await response.json();
+  if (response.status === 503) { location.replace("/"); throw new Error("Служба восстанавливается"); }
   if (response.status === 401) { location.assign("/login"); throw new Error("Сессия завершена"); }
   if (!response.ok) throw new Error(data.error || "Ошибка службы");
   return data;
@@ -101,6 +103,7 @@ async function activate() {
     el("p",{class:"muted"},"Белый список проверяется по адресу подключения из серверного журнала, сопоставленному с текущей сессией. Локальный адрес клиента за NAT показан только для справки."),
     el("p",{class:"muted"},`Расчёт: ${pre.dry_run.length} решений. После включения нужно повторно подключиться по RDP и подтвердить подключение. Иначе собственные правила будут сняты автоматически.`),
     field("backup_access","Резервный доступ проверен и доступен","checkbox","yes",{required:"required"}),
+    el("p",{},"После подтверждения Guard сможет восстанавливать защиту после перезагрузки и временных сбоев. Ручное отключение отменяет автоматическое восстановление."),
     field("confirmation","Введите ENABLE RDP GUARD","text","",{required:"required"})],async data=>{
       if(!pre.ready) throw new Error("Сначала устраните ошибки проверки");
       return api("activate",{confirmation:data.get("confirmation"),backup_access:data.get("backup_access")==="yes"});
@@ -116,6 +119,9 @@ async function dashboard() {
   if(s.lease?.deadline) content.push(el("section",{class:"banner"},el("div",{},el("h2",{},"Ожидается повторное RDP-подключение"),
     el("p",{},`Автоматический откат: ${fmt(s.lease.deadline)}`)),button("Подключение проверено",()=>confirmAction("Подтвердить подключение","После включения защиты закройте окно RDP на своём компьютере, не завершая сеанс Windows, и подключитесь снова с адреса из белого списка под Windows-администратором. Затем вернитесь сюда и нажмите «Подтвердить» до автоматического отката. Обновление страницы не считается переподключением.",()=>api("confirm-active")),"primary")));
   if(s.last_error) content.push(el("div",{class:"banner"},badge("ОШИБКА","bad"),s.last_error));
+  if(s.recovery) content.push(panel("Восстановление после перезагрузки",el("div",{},
+    badge(s.recovery.approved ? "Автовосстановление разрешено" : "Автовосстановление выключено",s.recovery.approved ? "good" : "warn"),
+    el("p",{},s.recovery.reason)),[button("История службы",()=>selectView("system"))]));
   content.push(el("div",{class:"toolbar"},badge(s.platform?.firewall ? "Windows Firewall · OK" : "Windows Firewall · требуется проверка",s.platform?.firewall ? "good" : "warn"),
     badge(s.collectors.Security?.healthy ? "Security · подписка активна" : "Security · требуется проверка",s.collectors.Security?.healthy ? "good" : "warn"),
     badge(s.collectors["Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"]?.healthy ? "RdpCoreTS · подписка активна" : "RdpCoreTS · требуется проверка",s.collectors["Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"]?.healthy ? "good" : "warn")));
@@ -216,6 +222,40 @@ function proxyConfigure(binding) {
     await api("proxy-configure",{binding:next});
   });
 }
+function proxyLists(page,labels,queryError) {
+  const search=el("form",{class:"toolbar"},field("query","IP или часть адреса","text",proxyFilter.query,{maxlength:"45"}));
+  for(const [key,label,options] of [["status","Статус",{"":"Все",...labels}],["sort","Сортировка",{recent:"Сначала новые",attempts:"Больше попыток",ip:"По IP"}]]) {
+    const select=el("select",{name:key},Object.entries(options).map(([value,text])=>el("option",{value},text)));
+    select.value=proxyFilter[key];search.append(el("label",{},label,select));
+  }
+  search.append(el("button",{type:"submit",class:"primary"},"Найти"),button("Сбросить",()=>{proxyFilter={query:"",status:"",sort:"recent",offset:0};proxySelection.clear();return render();}));
+  search.onsubmit=event=>{event.preventDefault();proxyFilter={...Object.fromEntries(new FormData(search)),offset:0};proxySelection.clear();render();};
+  const removeSelected=()=>{
+    if(!proxySelection.size)throw new Error("Сначала выберите IP в таблице");
+    return confirmAction("Снять выбранные блокировки",`Будут сняты блокировки для ${proxySelection.size} IP только на этом прокси. Доверенными эти IP не станут.`,async()=>{
+      for(const ip of [...proxySelection]) {await api("proxy-unblock",{client_ip:ip});proxySelection.delete(ip);}
+    });
+  };
+  const rows=page.results.map(r=>[
+    ["pending","blocked","proposed","suspended"].includes(r.status) ? el("input",{type:"checkbox","aria-label":`Выбрать ${r.client_ip}`,checked:proxySelection.has(r.client_ip),onchange:event=>{
+      if(event.target.checked)proxySelection.add(r.client_ip);else proxySelection.delete(r.client_ip);
+    }}) : "—",
+    el("div",{},el("span",{class:"mono"},r.client_ip),button("Копировать",()=>navigator.clipboard.writeText(r.client_ip))),
+    number(r.attempts),badge(labels[r.status] || r.status,r.status==="blocked" ? "good" : r.status==="suspended" ? "warn" : ""),
+    el("span",{title:r.reason || ""},fmt(r.expires)),
+    ["pending","blocked","proposed","suspended"].includes(r.status) ? button("Снять",()=>confirmAction("Снять блокировку",`IP ${r.client_ip}. Повторные решения подавляются на время окна обнаружения.`,()=>api("proxy-unblock",{client_ip:r.client_ip}))) : "—"
+  ]);
+  return [panel("Решения для реальных клиентов",el("div",{},search,
+    queryError ? el("p",{class:"muted"},queryError) : null,
+    page.threshold ? el("p",{class:"muted"},`Порог Linux: ${page.threshold} ошибок одного IP за ${page.window_seconds} секунд.`) : null,
+    table(["Выбор","IP клиента","Попыток","Статус","Срок","Действия"],rows),
+    el("div",{class:"pager"},button("← Назад",()=>{proxyFilter.offset=Math.max(0,proxyFilter.offset-50);proxySelection.clear();return render();}),
+      badge(`Найдено: ${page.total}. Показано: ${page.results.length ? page.offset+1 : 0}–${page.offset+page.results.length}`),
+      button("Далее →",()=>{if(page.offset+50<page.total){proxyFilter.offset+=50;proxySelection.clear();return render();}}))),
+    [button("Снять выбранные",removeSelected),button("Экспорт страницы",()=>download("rdpguard-proxy-results.json",page.results))]),
+    panel("Доверенные сети Linux",el("div",{},el("p",{class:"muted"},"Эти исключения применяются на прокси. Белый список Windows управляется отдельно."),
+      ...(page.whitelist || []).map(net=>el("div",{class:"status-row"},el("span",{class:"mono"},net),button("Копировать",()=>navigator.clipboard.writeText(net))))))];
+}
 async function proxyView() {
   const p=await api("proxy-status"),b=p.binding,s=p.status,health=b.enabled && !p.stale && s.healthy;
   const labels={observed:"Наблюдается",proposed:"Порог достигнут",pending:"Применяется",blocked:"Заблокирован",whitelisted:"Доверенный",removed:"Снят",removal_pending:"Снимается",suspended:"Приостановлен",expired:"Истёк"};
@@ -226,6 +266,11 @@ async function proxyView() {
   const connected=!!b.enabled && !p.stale && s.transport_healthy===true;
   const collecting=connected && s.capture_healthy===true && !!s.last_sent_utc;
   const matched=collecting && s.matched>0;
+  let page={results:s.results || [],total:(s.results || []).length,offset:0,limit:50}, queryError="";
+  if(connected) {
+    try {page=await api("proxy-results",proxyFilter);}
+    catch(error){queryError="Поиск недоступен: проверьте связь и версию Linux-агента. Показаны последние полученные записи. " + error.message;}
+  }
   if(b.enabled) {
     actions.push(button("Наблюдение",()=>api("proxy-configure",{binding:{...b,mode:"monitor"}})));
     actions.push(button("Отключить обмен",()=>confirmAction("Отключить агент", "Новые события перестанут передаваться. Адреса самого прокси сохранят исключение из локальных блокировок.",()=>api("proxy-configure",{binding:{enabled:false}}))));
@@ -246,10 +291,7 @@ async function proxyView() {
     el("p",{class:"muted"},s.enforcement_allowed ? "Агент разрешает блокировки после локальной проверки." : "Автоблокировки закрыты до проверки на изолированном стенде. Здесь видны результаты наблюдения."),
     el("p",{class:"muted"},`Адреса общей инфраструктуры: ${(p.relay_ips || []).join(", ") || "не заданы"}`),
     s.error ? el("p",{class:"muted"},s.error) : null),actions),
-    panel("Решения для реальных клиентов",table(["IP клиента","Попыток","Статус","Срок","Действия"],(s.results || []).map(r=>[
-      r.client_ip,number(r.attempts),labels[r.status] || r.status,fmt(r.expires),
-      ["pending","blocked","proposed"].includes(r.status) ? button("Снять",()=>api("proxy-unblock",{client_ip:r.client_ip})) : "—"
-    ])))];
+    ...proxyLists(page,labels,queryError)];
 }
 async function settingsView() {
   const s=await api("settings");
@@ -269,7 +311,7 @@ async function settingsView() {
   return [panel("Параметры обнаружения и блокировки",form)];
 }
 async function systemView() {
-  const [s,audit]=await Promise.all([api("health"),api("audit")]);
+  const [s,audit,serviceEvents]=await Promise.all([api("health"),api("audit"),api("service-events")]);
   const statuses=el("div",{},...Object.entries(s.platform).filter(([k])=>k!=="errors").map(([k,v])=>el("div",{class:"status-row"},k,badge(v ? "OK" : "ТРЕБУЕТ ПРОВЕРКИ",v ? "good" : "warn"))),
     ...Object.entries(s.collectors).map(([name,data])=>el("div",{class:"status-row"},el("span",{},name,el("small",{class:"muted"},data.error)),badge(data.healthy ? "Подписка активна" : "Ошибка",data.healthy ? "good" : "bad"))));
   return [panel("Состояние компонентов",el("div",{},el("p",{class:"muted"},`Версия ${s.version} · ${s.os} · Служба работает ${Math.floor(s.uptime/60)} мин. · ${s.mode}`),statuses,
@@ -278,6 +320,9 @@ async function systemView() {
       button("Сверить firewall",()=>confirmAction("Сверка firewall","Будут обновлены только собственные правила RDP Guard в соответствии с текущим режимом.",()=>api("firewall-reconcile")))]),
     panel("Аварийное отключение",el("div",{},el("p",{class:"muted"},"Отключает автоматическое реагирование и снимает только собственные блокировки. История и настройки сохраняются. Независимая команда: rdpguard.exe emergency-disable."),
       button("Аварийно снять блокировки",()=>confirmAction("Emergency Disable","Подтвердите снятие всех собственных блокировок RDP Guard.",()=>api("emergency-disable")),"danger"))),
+    panel("История службы и восстановления",el("div",{},el("p",{class:"muted"},"Запуски, остановки, ошибки и повторные попытки. SCM — события Windows. Неизвестный инициатор остановки не определяется предположением."),
+      table(["Время","Компонент","Событие","Причина / результат"],serviceEvents.map(e=>[fmt(e.timestamp),e.component,e.event,e.detail]))),
+      [button("Экспорт истории",()=>download("rdpguard-service-events.json",serviceEvents))]),
     panel("Аудит действий",table(["Время","Инициатор","Действие","Детали"],audit.map(a=>[fmt(a.timestamp),a.actor,a.action,el("span",{class:"mono"},a.detail)])))];
 }
 async function render() {
@@ -296,4 +341,4 @@ $("theme").onclick=()=>{const theme=document.documentElement.dataset.theme==="da
 document.documentElement.dataset.theme=localStorage.getItem("rdpguard-theme") || "dark";
 $("logout").onclick=async()=>{try{await api("logout");location.assign("/login");}catch(error){notice(error);}};
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>selectView(b.dataset.view));
-(async()=>{try{const response=await fetch("/api/session");if(!response.ok){location.assign("/login");return;}csrf=(await response.json()).csrf;await render();setInterval(()=>{if(["dashboard","events","proxy"].includes(view) && !$("modal").open && !document.querySelector("input:focus,select:focus"))render();},5000);}catch(error){notice(error);}})();
+(async()=>{try{const response=await fetch("/api/session");if(!response.ok){location.assign("/login");return;}csrf=(await response.json()).csrf;await render();setInterval(()=>{if(["dashboard","events","proxy","system"].includes(view) && !$("modal").open && !document.querySelector("input:focus,select:focus"))render();},5000);}catch(error){notice(error);}})();

@@ -13,7 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/Install-ProxyRelease.sh"
-PACKAGE = "rdpguard-proxy_1.1.0-rc.3_amd64.deb"
+PACKAGE = "rdpguard-proxy_1.1.0-rc.4_amd64.deb"
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ elif name == 'curl':
 elif name == 'sha256sum':
     print(hashlib.sha256(pathlib.Path(args[0]).read_bytes()).hexdigest(), ' ', args[0])
 elif name == 'dpkg-deb':
-    metadata = {'Package': 'rdpguard-proxy', 'Version': '1.1.0~rc3', 'Architecture': 'amd64'}
+    metadata = {'Package': 'rdpguard-proxy', 'Version': '1.1.0~rc4', 'Architecture': 'amd64'}
     metadata.update(json.loads(os.environ.get('PACKAGE_METADATA', '{}')))
     print(metadata[args[-1]])
 elif name == 'apt-get':
@@ -115,7 +115,7 @@ def test_verified_release_installs_before_interactive_setup(installer):
         assert command[command.index("--proto") + 1] == "=https"
         assert "--fail" in command and "--tlsv1.2" in command
         url = next(value for value in command if value.startswith("https:"))
-        assert url.startswith("https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.3/")
+        assert url.startswith("https://github.com/tolabzik/RDP_GUARD/releases/download/v1.1.0-rc.4/")
         asset = url.rsplit("/", 1)[1]
         assert asset in (PACKAGE, PACKAGE + ".sha256")
         assert re.fullmatch(r"[A-Za-z0-9_.-]+", asset)

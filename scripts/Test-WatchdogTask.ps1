@@ -49,6 +49,10 @@ function Start-ScheduledTask {
 $script:TestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('rdpguard-task-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $script:TestRoot | Out-Null
 try {
+    Set-RdpGuardMaintenance -DataRoot $script:TestRoot
+    $Maintenance = Get-Content (Join-Path $script:TestRoot 'maintenance.json') -Raw | ConvertFrom-Json
+    $Now = ([DateTime]::UtcNow - [DateTime]'1970-01-01Z').TotalSeconds
+    Assert-Task ($Maintenance.until -gt $Now -and $Maintenance.until -le $Now + 1800) 'Installer pause must be bounded to 30 minutes.'
     New-Item -ItemType File -Path (Join-Path $script:TestRoot 'rdpguard.exe') | Out-Null
     Register-RdpGuardWatchdog -InstallRoot $script:TestRoot
     Assert-Task (($script:Calls -join ',') -eq 'register,start') 'Register before starting the task.'

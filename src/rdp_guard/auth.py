@@ -7,7 +7,8 @@ from argon2 import PasswordHasher, Type
 from argon2.exceptions import InvalidHashError, VerificationError
 
 READ_OPERATIONS = {"status", "health", "preflight", "events", "list-blocks", "list-whitelist", "audit",
-                   "settings", "export-config", "diagnostics", "proxy-status", "proxy-pair-preview", "proxy-pair-status"}
+                   "settings", "export-config", "diagnostics", "proxy-status", "proxy-pair-preview", "proxy-pair-status",
+                   "service-events", "proxy-results"}
 
 
 class AuthenticationError(ValueError):
@@ -103,10 +104,11 @@ class Dispatcher:
                 actor = f"windows:{identity['sid']}"
             else:
                 raise AuthenticationError("IPC identity denied")
-            try:
-                return self.guard.dispatch(operation, args, actor)
-            except Exception as exc:
-                if operation not in READ_OPERATIONS:
-                    # Never serialize request credentials or arbitrary payloads to audit.
+        try:
+            return self.guard.dispatch(operation, args, actor)
+        except Exception as exc:
+            if operation not in READ_OPERATIONS:
+                # Never serialize request credentials or arbitrary payloads to audit.
+                with self.guard.lock:
                     self.guard.store.audit(actor, "command-rejected", {"op": operation, "error": str(exc)})
-                raise
+            raise

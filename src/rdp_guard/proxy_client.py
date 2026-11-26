@@ -122,7 +122,7 @@ def sanitize_status(receipt):
             instant(value)
             clean[name] = value[:64]
     if status.get("error"):
-        clean["error"] = "Proxy agent reports an error"
+        clean["error"] = "Proxy agent reported an error; inspect its protected journal"
     else:
         clean["error"] = ""
     results = receipt.get("results", [])
@@ -153,7 +153,7 @@ class ProxyTransport:
         self.binding, self.connection_factory, self.context_factory = binding, connection_factory, context_factory
 
     def post(self, endpoint, envelope):
-        if endpoint not in ("/v1/evidence", "/v1/status", "/v1/unblock"):
+        if endpoint not in ("/v1/evidence", "/v1/status", "/v1/unblock", "/v1/results"):
             raise ValueError("Unsupported proxy API endpoint")
         body = json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(body) > MAX_BYTES:
